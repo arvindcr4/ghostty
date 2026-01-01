@@ -13,6 +13,7 @@ const gtk = @import("gtk");
 const Common = @import("../class.zig").Common;
 const Application = @import("application.zig").Application;
 const Window = @import("window.zig").Window;
+const persistence = @import("ai_persistence.zig");
 
 const log = std.log.scoped(.gtk_ghostty_command_bookmarks);
 
@@ -65,7 +66,7 @@ pub const CommandBookmarksDialog = extern struct {
                 if (self.category) |cat| alloc.free(cat);
                 for (self.tags) |tag| alloc.free(tag);
                 if (self.tags.len > 0) {
-                    alloc.free(self.tags.ptr);
+                    alloc.free(self.tags);
                 }
                 gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
             }
@@ -95,21 +96,27 @@ pub const CommandBookmarksDialog = extern struct {
             return self;
         }
 
-        pub fn deinit(self: *BookmarkItem, alloc: Allocator) void {
-            alloc.free(self.name);
-            alloc.free(self.command);
-            if (self.description) |desc| alloc.free(desc);
-            if (self.category) |cat| alloc.free(cat);
-            for (self.tags) |tag| alloc.free(tag);
-            if (self.tags.len > 0) {
-                alloc.free(self.tags.ptr);
-            }
-        }
-
         pub fn addTag(self: *BookmarkItem, alloc: Allocator, tag: []const u8) !void {
-            const new_tags = try alloc.realloc(self.tags.ptr, self.tags.len + 1);
-            new_tags[self.tags.len] = try alloc.dupeZ(u8, tag);
-            self.tags = new_tags[0..self.tags.len + 1];
+            // Allocate the new tag string first (separate to handle errdefer)
+            const new_tag = try alloc.dupeZ(u8, tag);
+            errdefer alloc.free(new_tag);
+
+            // Allocate new array - use alloc.alloc instead of realloc to avoid
+            // undefined behavior when self.tags is empty (&.{})
+            const new_tags = try alloc.alloc([:0]const u8, self.tags.len + 1);
+
+            // Copy existing tags
+            @memcpy(new_tags[0..self.tags.len], self.tags);
+
+            // Add new tag at the end
+            new_tags[self.tags.len] = new_tag;
+
+            // Free old array if it was allocated (not the empty slice sentinel)
+            if (self.tags.len > 0) {
+                alloc.free(self.tags);
+            }
+
+            self.tags = new_tags;
         }
 
         pub fn incrementUse(self: *BookmarkItem) void {
@@ -128,21 +135,9 @@ pub const CommandBookmarksDialog = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all bookmark items in the store to prevent memory leaks.
-            // We must: (1) deinit internal allocations, (2) clear store to release refs.
-            // This prevents double-free when GObject finalizes the store.
+            // Clean up all bookmark items - just removeAll, GObject dispose handles item cleanup
             if (priv.bookmarks_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const bookmark_item: *BookmarkItem = @ptrCast(@alignCast(item));
-                        bookmark_item.deinit(alloc);
-                    }
-                }
-                // Clear store to release references before parent dispose
                 store.removeAll();
             }
 
@@ -162,8 +157,7 @@ pub const CommandBookmarksDialog = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -192,7 +186,7 @@ pub const CommandBookmarksDialog = extern struct {
         factory.connectSetup(&setupBookmarkItem, null);
         factory.connectBind(&bindBookmarkItem, null);
 
-        const selection = gtk.SingleSelection.new(store.as(gobject.Object));
+        const selection = gtk.SingleSelection.new(store.as(gio.ListModel));
         const list_view = gtk.ListView.new(selection.as(gtk.SelectionModel), factory);
         list_view.setSingleClickActivate(true);
         _ = list_view.connectActivate(&onBookmarkActivated, self);
@@ -281,6 +275,10 @@ pub const CommandBookmarksDialog = extern struct {
         box.append(action_box.as(gtk.Widget));
 
         item.setChild(box.as(gtk.Widget));
+
+        // Connect signal handlers once during setup to prevent leaks on rebind
+        _ = use_btn.connectClicked(&onUseBookmarkListItem, item);
+        _ = delete_btn.connectClicked(&onDeleteBookmarkListItem, item);
     }
 
     fn bindBookmarkItem(_: *gtk.SignalListItemFactory, item: *gtk.ListItem, _: ?*anyopaque) callconv(.c) void {
@@ -305,55 +303,268 @@ pub const CommandBookmarksDialog = extern struct {
                         }
                     }
                 }
-                if (info_box.getNextSibling()) |action_box| {
-                    if (action_box.as(gtk.Box).getFirstChild()) |use_btn| {
-                        _ = use_btn.as(gtk.Button).connectClicked(&onUseBookmark, bookmark_item);
-                        if (use_btn.getNextSibling()) |delete_btn| {
-                            _ = delete_btn.as(gtk.Button).connectClicked(&onDeleteBookmark, bookmark_item);
+            }
+        }
+    }
+
+    fn onSearchChanged(entry: *gtk.SearchEntry, self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const query = entry.getText();
+        if (priv.bookmarks_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const bookmark_item: *BookmarkItem = @ptrCast(@alignCast(item));
+                    const matches = if (query.len == 0) true else blk: {
+                        const name_match = std.mem.indexOf(u8, bookmark_item.name, query) != null;
+                        const cmd_match = std.mem.indexOf(u8, bookmark_item.command, query) != null;
+                        const desc_match = if (bookmark_item.description) |desc|
+                            std.mem.indexOf(u8, desc, query) != null
+                        else
+                            false;
+                        const cat_match = if (bookmark_item.category) |cat|
+                            std.mem.indexOf(u8, cat, query) != null
+                        else
+                            false;
+                        break :blk name_match or cmd_match or desc_match or cat_match;
+                    };
+                    // TODO: Use FilterListModel for proper filtering
+                    _ = matches;
+                }
+            }
+        }
+    }
+
+    fn onAddBookmark(_: *gtk.Button, self: *Self) callconv(.c) void {
+        const parent = self.as(adw.PreferencesWindow).getTransientFor() orelse return;
+
+        const dialog = adw.MessageDialog.new(parent.as(gtk.Window), "Add Bookmark", null);
+        dialog.setBody("Enter bookmark details");
+        dialog.addResponse("cancel", "Cancel");
+        dialog.addResponse("add", "Add");
+        dialog.setDefaultResponse("add");
+        dialog.setCloseResponse("cancel");
+
+        const content_area = dialog.getChild();
+        const content_box = content_area.as(gtk.Box);
+
+        const name_entry = gtk.Entry.new();
+        name_entry.setPlaceholderText("Bookmark name");
+        name_entry.setHexpand(true);
+
+        const command_entry = gtk.Entry.new();
+        command_entry.setPlaceholderText("Command");
+        command_entry.setHexpand(true);
+
+        const desc_entry = gtk.Entry.new();
+        desc_entry.setPlaceholderText("Description (optional)");
+        desc_entry.setHexpand(true);
+
+        const cat_entry = gtk.Entry.new();
+        cat_entry.setPlaceholderText("Category (optional)");
+        cat_entry.setHexpand(true);
+
+        const form_box = gtk.Box.new(gtk.Orientation.vertical, 12);
+        form_box.append(gtk.Label.new("Name:").as(gtk.Widget));
+        form_box.append(name_entry.as(gtk.Widget));
+        form_box.append(gtk.Label.new("Command:").as(gtk.Widget));
+        form_box.append(command_entry.as(gtk.Widget));
+        form_box.append(gtk.Label.new("Description:").as(gtk.Widget));
+        form_box.append(desc_entry.as(gtk.Widget));
+        form_box.append(gtk.Label.new("Category:").as(gtk.Widget));
+        form_box.append(cat_entry.as(gtk.Widget));
+
+        content_box.append(form_box.as(gtk.Widget));
+
+        _ = dialog.connectResponse(&onAddBookmarkResponse, .{ .self = self, .name_entry = name_entry, .command_entry = command_entry, .desc_entry = desc_entry, .cat_entry = cat_entry });
+        dialog.present();
+    }
+
+    fn onAddBookmarkResponse(dialog: *adw.MessageDialog, response: [:0]const u8, data: struct { self: *Self, name_entry: *gtk.Entry, command_entry: *gtk.Entry, desc_entry: *gtk.Entry, cat_entry: *gtk.Entry }) callconv(.c) void {
+        if (!std.mem.eql(u8, response, "add")) {
+            dialog.close();
+            return;
+        }
+
+        const name = data.name_entry.getText();
+        const command = data.command_entry.getText();
+        if (name.len == 0 or command.len == 0) {
+            dialog.close();
+            return;
+        }
+
+        const desc = data.desc_entry.getText();
+        const cat = data.cat_entry.getText();
+
+        const desc_opt = if (desc.len > 0) desc else null;
+        const cat_opt = if (cat.len > 0) cat else null;
+
+        data.self.addBookmark(name, command, desc_opt, cat_opt) catch |err| {
+            log.err("Failed to add bookmark: {}", .{err});
+        };
+
+        dialog.close();
+    }
+
+    fn onBookmarkActivated(_: *gtk.ListView, position: u32, self: *Self) callconv(.c) void {
+        if (getPriv(self).bookmarks_store) |store| {
+            if (store.getItem(position)) |item| {
+                const bookmark_item: *BookmarkItem = @ptrCast(@alignCast(item));
+                bookmark_item.incrementUse();
+                const clipboard = self.as(adw.PreferencesWindow).as(gtk.Widget).getClipboard();
+                clipboard.setText(bookmark_item.command);
+                log.info("Copied to clipboard: {s}", .{bookmark_item.command});
+            }
+        }
+    }
+
+    fn onUseBookmarkListItem(_: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const bookmark_item = @as(*BookmarkItem, @ptrCast(@alignCast(entry)));
+        bookmark_item.incrementUse();
+        // Get parent dialog from list item's widget tree
+        if (list_item.getChild()) |child| {
+            if (child.as(gtk.Widget).getRoot()) |root| {
+                if (root.as(gtk.Window).getTransientFor()) |transient| {
+                    const clipboard = transient.as(gtk.Widget).getClipboard();
+                    clipboard.setText(bookmark_item.command);
+                    log.info("Copied to clipboard: {s}", .{bookmark_item.command});
+                }
+            }
+        }
+    }
+
+    fn onDeleteBookmarkListItem(_: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const bookmark_item = @as(*BookmarkItem, @ptrCast(@alignCast(entry)));
+        // Find the dialog that owns this item
+        if (list_item.getChild()) |child| {
+            if (child.as(gtk.Widget).getRoot()) |root| {
+                if (root.as(gtk.Window).getTransientFor()) |transient| {
+                    // Find the dialog
+                    var current: ?*gtk.Widget = transient.as(gtk.Widget);
+                    while (current) |widget| {
+                        if (widget.getType() == Self.getGObjectType()) {
+                            const self = @as(*Self, @ptrCast(@alignCast(widget)));
+                            const priv = getPriv(self);
+                            if (priv.bookmarks_store) |store| {
+                                const n = store.getNItems();
+                                var i: u32 = 0;
+                                while (i < n) : (i += 1) {
+                                    if (store.getItem(i)) |item| {
+                                        if (item == bookmark_item.as(gobject.Object)) {
+                                            // Remove from store - GObject dispose handles cleanup
+                                            store.remove(i);
+                                            self.saveBookmarks();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
                         }
+                        current = widget.getParent();
                     }
                 }
             }
         }
     }
 
-    fn onSearchChanged(entry: *gtk.SearchEntry, self: *Self) callconv(.c) void {
-        _ = entry;
-        _ = self;
-        // TODO: Implement search filtering
-    }
+    fn loadBookmarks(self: *Self) void {
+        const alloc = Application.default().allocator();
+        const filepath = persistence.getDataFilePath(alloc, "bookmarks.json") catch |err| {
+            log.err("Failed to get bookmarks file path: {}", .{err});
+            // Load example bookmarks as fallback
+            self.addBookmark("Git Status", "git status", "Check git repository status", "Git") catch {};
+            self.addBookmark("Docker PS", "docker ps -a", "List all Docker containers", "Docker") catch {};
+            return;
+        };
+        defer alloc.free(filepath);
 
-    fn onAddBookmark(_: *gtk.Button, _: *Self) callconv(.c) void {
-        // TODO: Show dialog to add new bookmark
-        log.info("Add bookmark clicked", .{});
-    }
+        const BookmarksData = struct {
+            bookmarks: []const struct {
+                name: []const u8,
+                command: []const u8,
+                description: ?[]const u8 = null,
+                category: ?[]const u8 = null,
+                use_count: u32 = 0,
+                created_at: i64 = 0,
+            } = &.{},
+        };
 
-    fn onBookmarkActivated(_: *gtk.ListView, position: u32, self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        if (priv.bookmarks_store) |store| {
-            if (store.getItem(position)) |item| {
-                const bookmark_item: *BookmarkItem = @ptrCast(@alignCast(item));
-                bookmark_item.incrementUse();
-                // TODO: Execute command or copy to clipboard
-                log.info("Bookmark activated: {s}", .{bookmark_item.command});
-            }
+        const data = persistence.loadJson(BookmarksData, alloc, filepath) catch |err| {
+            log.err("Failed to load bookmarks: {}", .{err});
+            // Load example bookmarks as fallback
+            self.addBookmark("Git Status", "git status", "Check git repository status", "Git") catch {};
+            self.addBookmark("Docker PS", "docker ps -a", "List all Docker containers", "Docker") catch {};
+            return;
+        };
+        defer alloc.free(data.bookmarks);
+
+        for (data.bookmarks) |bm| {
+            self.addBookmark(bm.name, bm.command, bm.description, bm.category) catch continue;
         }
     }
 
-    fn onUseBookmark(_: *gtk.Button, bookmark_item: *BookmarkItem) callconv(.c) void {
-        bookmark_item.incrementUse();
-        // TODO: Execute command or copy to clipboard
-        log.info("Use bookmark: {s}", .{bookmark_item.command});
-    }
+    fn saveBookmarks(self: *Self) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
 
-    fn onDeleteBookmark(_: *gtk.Button, bookmark_item: *BookmarkItem) callconv(.c) void {
-        // TODO: Remove from store and save
-        log.info("Delete bookmark: {s}", .{bookmark_item.name});
-    }
+        const filepath = persistence.getDataFilePath(alloc, "bookmarks.json") catch |err| {
+            log.err("Failed to get bookmarks file path: {}", .{err});
+            return;
+        };
+        defer alloc.free(filepath);
 
-    fn loadBookmarks(_: *Self) void {
-        // TODO: Load bookmarks from persistent storage
-        log.info("Loading bookmarks...", .{});
+        const BookmarksData = struct {
+            bookmarks: []const struct {
+                name: []const u8,
+                command: []const u8,
+                description: ?[]const u8,
+                category: ?[]const u8,
+                use_count: u32,
+                created_at: i64,
+            },
+        };
+
+        if (priv.bookmarks_store) |store| {
+            const n = store.getNItems();
+            var bookmarks_list = std.ArrayList(struct {
+                name: []const u8,
+                command: []const u8,
+                description: ?[]const u8,
+                category: ?[]const u8,
+                use_count: u32,
+                created_at: i64,
+            }).init(alloc);
+            defer bookmarks_list.deinit();
+
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const bookmark_item: *BookmarkItem = @ptrCast(@alignCast(item));
+                    bookmarks_list.append(.{
+                        .name = bookmark_item.name,
+                        .command = bookmark_item.command,
+                        .description = bookmark_item.description,
+                        .category = bookmark_item.category,
+                        .use_count = bookmark_item.use_count,
+                        .created_at = bookmark_item.created_at,
+                    }) catch continue;
+                }
+            }
+
+            const data = BookmarksData{ .bookmarks = bookmarks_list.toOwnedSlice() catch |err| {
+                log.err("Failed to convert bookmarks list: {}", .{err});
+                return;
+            } };
+            defer alloc.free(data.bookmarks);
+
+            persistence.saveJson(alloc, filepath, data) catch |err| {
+                log.err("Failed to save bookmarks: {}", .{err});
+            };
+        }
     }
 
     pub fn addBookmark(self: *Self, name: []const u8, command: []const u8, description: ?[]const u8, category: ?[]const u8) !void {
@@ -364,7 +575,7 @@ pub const CommandBookmarksDialog = extern struct {
         if (priv.bookmarks_store) |store| {
             store.append(bookmark.as(gobject.Object));
         }
-        // TODO: Save to persistent storage
+        saveBookmarks(self);
     }
 
     pub fn show(self: *Self, parent: *Window) void {

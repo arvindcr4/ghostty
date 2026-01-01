@@ -6525,6 +6525,13 @@ pub const Keybinds = struct {
             .toggle_command_palette,
         );
 
+        // AI input mode - Ctrl+Shift+A (Cmd+Shift+A on macOS)
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .unicode = 'a' }, .mods = inputpkg.ctrlOrSuper(.{ .shift = true }) },
+            .ai_input_mode,
+        );
+
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
             try self.set.put(

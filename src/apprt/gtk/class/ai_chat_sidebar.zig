@@ -107,8 +107,7 @@ pub const ChatSidebar = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -213,18 +212,9 @@ pub const ChatSidebar = extern struct {
     fn newChat(button: *gtk.Button, self: *Self) callconv(.c) void {
         _ = button;
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
 
-        // Clear chat history
+        // Clear chat history - just removeAll, GObject dispose handles item cleanup
         if (priv.chat_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const message: *ChatMessage = @ptrCast(@alignCast(item));
-                    message.deinit(alloc);
-                }
-            }
             store.removeAll();
         }
     }
@@ -254,18 +244,10 @@ pub const ChatSidebar = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
 
-        // Clean up all chat messages
+        // Clean up all chat messages - just removeAll, GObject dispose handles item cleanup
         if (priv.chat_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const message: *ChatMessage = @ptrCast(@alignCast(item));
-                    message.deinit(alloc);
-                }
-            }
+            store.removeAll();
         }
 
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));

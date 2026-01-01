@@ -116,18 +116,10 @@ pub const CommandAnalysisDialog = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all insight items
+            // Clean up all insight items - just removeAll, GObject dispose handles item cleanup
             if (priv.insights_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const insight_item: *InsightItem = @ptrCast(@alignCast(item));
-                        insight_item.deinit(alloc);
-                    }
-                }
+                store.removeAll();
             }
 
             gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
@@ -299,7 +291,6 @@ pub const CommandAnalysisDialog = extern struct {
             buffer.setText(output_z, -1);
         }
     }
-
 
     pub fn show(self: *Self, parent: *Window) void {
         self.as(adw.Window).setTransientFor(parent.as(gtk.Window));

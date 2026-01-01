@@ -54,7 +54,25 @@ pub const ErrorRecoveryDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &FixItem.dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &FixItem.finalize);
+            }
+
+            fn dispose(self: *FixItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.description.len > 0) {
+                    alloc.free(self.description);
+                    self.description = "";
+                }
+                if (self.command.len > 0) {
+                    alloc.free(self.command);
+                    self.command = "";
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *FixItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
@@ -95,8 +113,7 @@ pub const ErrorRecoveryDialog = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -185,6 +202,9 @@ pub const ErrorRecoveryDialog = extern struct {
         box.append(apply_btn.as(gtk.Widget));
 
         item.setChild(box.as(gtk.Widget));
+
+        // Connect signal handler once during setup to prevent leaks on rebind
+        _ = apply_btn.connectClicked(&applyFixListItem, item);
     }
 
     fn bindFixItem(_: *gtk.SignalListItemFactory, item: *gtk.ListItem, _: ?*anyopaque) callconv(.c) void {
@@ -197,15 +217,13 @@ pub const ErrorRecoveryDialog = extern struct {
             desc.as(gtk.Label).setText(fix_item.description);
             if (desc.getNextSibling()) |command| {
                 command.as(gtk.Label).setText(fix_item.command);
-                if (command.getNextSibling()) |apply_btn| {
-                    // Connect button click handler
-                    _ = apply_btn.as(gtk.Button).connectClicked(&applyFix, fix_item);
-                }
             }
         }
     }
 
-    fn applyFix(_: *gtk.Button, fix_item: *FixItem) callconv(.c) void {
+    fn applyFixListItem(_: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const fix_item = @as(*FixItem, @ptrCast(@alignCast(entry)));
         log.info("Applying fix: {s}", .{fix_item.command});
         // TODO: Execute the fix command in the terminal
         // For now, just log that we would apply the fix
@@ -213,18 +231,10 @@ pub const ErrorRecoveryDialog = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
 
-        // Clean up all fix items
+        // Clean up all fix items - just removeAll, GObject dispose handles item cleanup
         if (priv.fixes_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const fix_item: *FixItem = @ptrCast(@alignCast(item));
-                    fix_item.deinit(alloc);
-                }
-            }
+            store.removeAll();
         }
 
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));

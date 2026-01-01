@@ -13,6 +13,7 @@ const gtk = @import("gtk");
 const Common = @import("../class.zig").Common;
 const Application = @import("application.zig").Application;
 const Window = @import("window.zig").Window;
+const persistence = @import("ai_persistence.zig");
 
 const log = std.log.scoped(.gtk_ghostty_aliases_manager);
 
@@ -104,21 +105,9 @@ pub const AliasesManagerDialog = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all alias items in the store to prevent memory leaks.
-            // We must: (1) deinit internal allocations, (2) clear store to release refs.
-            // This prevents double-free when GObject finalizes the store.
+            // Clean up all alias items - just removeAll, GObject dispose handles item cleanup
             if (priv.aliases_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const alias_item: *AliasItem = @ptrCast(@alignCast(item));
-                        alias_item.deinit(alloc);
-                    }
-                }
-                // Clear store to release references before parent dispose
                 store.removeAll();
             }
 
@@ -138,8 +127,7 @@ pub const AliasesManagerDialog = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -158,7 +146,7 @@ pub const AliasesManagerDialog = extern struct {
 
         // Create shell dropdown
         const shell_store = gio.ListStore.new(gobject.Object.getGObjectType());
-        const shell_dropdown = gtk.DropDown.new(shell_store.as(gobject.Object), null);
+        const shell_dropdown = gtk.DropDown.new(shell_store.as(gio.ListModel), null);
         shell_dropdown.setTooltipText("Filter by shell");
         _ = shell_dropdown.connectNotify("selected", &onShellChanged, self);
         priv.shell_dropdown = shell_dropdown;
@@ -175,7 +163,7 @@ pub const AliasesManagerDialog = extern struct {
         factory.connectSetup(&setupAliasItem, null);
         factory.connectBind(&bindAliasItem, null);
 
-        const selection = gtk.SingleSelection.new(store.as(gobject.Object));
+        const selection = gtk.SingleSelection.new(store.as(gio.ListModel));
         const list_view = gtk.ListView.new(selection.as(gtk.SelectionModel), factory);
         list_view.setSingleClickActivate(true);
         _ = list_view.connectActivate(&onAliasActivated, self);
@@ -265,6 +253,11 @@ pub const AliasesManagerDialog = extern struct {
         box.append(action_box.as(gtk.Widget));
 
         item.setChild(box.as(gtk.Widget));
+
+        // Connect signal handlers once during setup to prevent leaks on rebind
+        _ = toggle.connectNotify("active", &onToggleAliasListItem, item);
+        _ = edit_btn.connectClicked(&onEditAliasListItem, item);
+        _ = delete_btn.connectClicked(&onDeleteAliasListItem, item);
     }
 
     fn bindAliasItem(_: *gtk.SignalListItemFactory, item: *gtk.ListItem, _: ?*anyopaque) callconv(.c) void {
@@ -275,7 +268,6 @@ pub const AliasesManagerDialog = extern struct {
 
         if (box_widget.getFirstChild()) |toggle| {
             toggle.as(gtk.Switch).setActive(alias_item.enabled);
-            _ = toggle.as(gtk.Switch).connectNotify("notify::active", &onToggleAlias, alias_item);
             if (toggle.getNextSibling()) |info_box| {
                 if (info_box.as(gtk.Box).getFirstChild()) |name| {
                     name.as(gtk.Label).setText(alias_item.name);
@@ -291,16 +283,32 @@ pub const AliasesManagerDialog = extern struct {
                         }
                     }
                 }
-                if (info_box.getNextSibling()) |action_box| {
-                    if (action_box.as(gtk.Box).getFirstChild()) |edit_btn| {
-                        _ = edit_btn.as(gtk.Button).connectClicked(&onEditAlias, alias_item);
-                        if (edit_btn.getNextSibling()) |delete_btn| {
-                            _ = delete_btn.as(gtk.Button).connectClicked(&onDeleteAlias, alias_item);
-                        }
-                    }
-                }
             }
         }
+    }
+
+    fn onToggleAliasListItem(_: *gobject.Object, _: glib.ParamSpec, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const alias_item = @as(*AliasItem, @ptrCast(@alignCast(entry)));
+        // Get toggle state from widget
+        const box = list_item.getChild() orelse return;
+        if (box.as(gtk.Box).getFirstChild()) |toggle| {
+            alias_item.enabled = toggle.as(gtk.Switch).getActive();
+        }
+        // TODO: Save aliases when toggle changes
+        log.info("Alias toggled: {s} enabled={}", .{ alias_item.name, alias_item.enabled });
+    }
+
+    fn onEditAliasListItem(_: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const alias_item = @as(*AliasItem, @ptrCast(@alignCast(entry)));
+        onEditAlias(null, alias_item);
+    }
+
+    fn onDeleteAliasListItem(_: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const alias_item = @as(*AliasItem, @ptrCast(@alignCast(entry)));
+        onDeleteAliasFromItem(alias_item);
     }
 
     fn onSearchChanged(entry: *gtk.SearchEntry, self: *Self) callconv(.c) void {
@@ -314,13 +322,6 @@ pub const AliasesManagerDialog = extern struct {
         // TODO: Implement shell filtering
     }
 
-    fn onToggleAlias(obj: *gobject.Object, _: glib.ParamSpec, alias_item: *AliasItem) callconv(.c) void {
-        const toggle = @as(*gtk.Switch, @ptrCast(@alignCast(obj)));
-        alias_item.enabled = toggle.getActive();
-        // TODO: Save alias state
-        log.info("Toggle alias {s}: {}", .{ alias_item.name, alias_item.enabled });
-    }
-
     fn onAliasActivated(_: *gtk.ListView, position: u32, self: *Self) callconv(.c) void {
         const priv = getPriv(self);
         if (priv.aliases_store) |store| {
@@ -332,13 +333,14 @@ pub const AliasesManagerDialog = extern struct {
         }
     }
 
-    fn onEditAlias(_: *gtk.Button, alias_item: *AliasItem) callconv(.c) void {
+    fn onEditAlias(_: ?*gtk.Button, alias_item: *AliasItem) callconv(.c) void {
         // TODO: Show edit dialog
         log.info("Edit alias: {s}", .{alias_item.name});
     }
 
-    fn onDeleteAlias(_: *gtk.Button, alias_item: *AliasItem) callconv(.c) void {
-        // TODO: Remove from store and save
+    fn onDeleteAliasFromItem(alias_item: *AliasItem) void {
+        // TODO: Find parent dialog and remove from store
+        // For now just log the intent - proper implementation needs dialog reference
         log.info("Delete alias: {s}", .{alias_item.name});
     }
 
@@ -348,20 +350,108 @@ pub const AliasesManagerDialog = extern struct {
     }
 
     fn loadAliases(self: *Self) void {
+        const alloc = Application.default().allocator();
+        const filepath = persistence.getDataFilePath(alloc, "aliases.json") catch |err| {
+            log.err("Failed to get aliases file path: {}", .{err});
+            // Load example aliases as fallback
+            const priv = getPriv(self);
+            const ll = AliasItem.new(alloc, "ll", "ls -la", "bash", "List all files") catch return;
+            if (priv.aliases_store) |store| {
+                store.append(ll.as(gobject.Object));
+            }
+            const gst = AliasItem.new(alloc, "gst", "git status", "bash", "Git status") catch return;
+            if (priv.aliases_store) |store| {
+                store.append(gst.as(gobject.Object));
+            }
+            return;
+        };
+        defer alloc.free(filepath);
+
+        const AliasesData = struct {
+            aliases: []const struct {
+                name: []const u8,
+                command: []const u8,
+                shell: []const u8,
+                description: ?[]const u8 = null,
+                enabled: bool = true,
+            } = &.{},
+        };
+
+        const data = persistence.loadJson(AliasesData, alloc, filepath) catch |err| {
+            log.err("Failed to load aliases: {}", .{err});
+            // Load example aliases as fallback
+            const priv = getPriv(self);
+            const ll = AliasItem.new(alloc, "ll", "ls -la", "bash", "List all files") catch return;
+            if (priv.aliases_store) |store| {
+                store.append(ll.as(gobject.Object));
+            }
+            const gst = AliasItem.new(alloc, "gst", "git status", "bash", "Git status") catch return;
+            if (priv.aliases_store) |store| {
+                store.append(gst.as(gobject.Object));
+            }
+            return;
+        };
+        defer alloc.free(data.aliases);
+
+        for (data.aliases) |alias| {
+            self.addAlias(alias.name, alias.command, alias.shell, alias.description) catch continue;
+        }
+    }
+
+    fn saveAliases(self: *Self) void {
         const priv = getPriv(self);
         const alloc = Application.default().allocator();
-        // TODO: Load aliases from shell config files
-        log.info("Loading aliases...", .{});
 
-        // Add some example aliases
-        const ll = AliasItem.new(alloc, "ll", "ls -la", "bash", "List all files") catch return;
-        if (priv.aliases_store) |store| {
-            store.append(ll.as(gobject.Object));
-        }
+        const filepath = persistence.getDataFilePath(alloc, "aliases.json") catch |err| {
+            log.err("Failed to get aliases file path: {}", .{err});
+            return;
+        };
+        defer alloc.free(filepath);
 
-        const gst = AliasItem.new(alloc, "gst", "git status", "bash", "Git status") catch return;
+        const AliasesData = struct {
+            aliases: []const struct {
+                name: []const u8,
+                command: []const u8,
+                shell: []const u8,
+                description: ?[]const u8,
+                enabled: bool,
+            },
+        };
+
         if (priv.aliases_store) |store| {
-            store.append(gst.as(gobject.Object));
+            const n = store.getNItems();
+            var aliases_list = std.ArrayList(struct {
+                name: []const u8,
+                command: []const u8,
+                shell: []const u8,
+                description: ?[]const u8,
+                enabled: bool,
+            }).init(alloc);
+            defer aliases_list.deinit();
+
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const alias_item: *AliasItem = @ptrCast(@alignCast(item));
+                    aliases_list.append(.{
+                        .name = alias_item.name,
+                        .command = alias_item.command,
+                        .shell = alias_item.shell,
+                        .description = alias_item.description,
+                        .enabled = alias_item.enabled,
+                    }) catch continue;
+                }
+            }
+
+            const data = AliasesData{ .aliases = aliases_list.toOwnedSlice() catch |err| {
+                log.err("Failed to convert aliases list: {}", .{err});
+                return;
+            } };
+            defer alloc.free(data.aliases);
+
+            persistence.saveJson(alloc, filepath, data) catch |err| {
+                log.err("Failed to save aliases: {}", .{err});
+            };
         }
     }
 
@@ -373,7 +463,7 @@ pub const AliasesManagerDialog = extern struct {
         if (priv.aliases_store) |store| {
             store.append(alias.as(gobject.Object));
         }
-        // TODO: Save to shell config file
+        saveAliases(self);
     }
 
     pub fn show(self: *Self, parent: *Window) void {

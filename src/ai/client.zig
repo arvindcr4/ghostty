@@ -50,6 +50,7 @@ pub const Provider = enum {
     anthropic,
     ollama,
     custom,
+    cerebras,
 };
 
 /// Write a JSON-escaped string to the writer (without surrounding quotes)
@@ -120,6 +121,7 @@ pub const Client = struct {
             .anthropic => try self.chatAnthropic(system_prompt, user_prompt),
             .ollama => try self.chatOllama(system_prompt, user_prompt),
             .custom => try self.chatCustom(system_prompt, user_prompt),
+            .cerebras => try self.chatCerebras(system_prompt, user_prompt),
         };
     }
 
@@ -215,19 +217,11 @@ pub const Client = struct {
         // Build: {"model":"...","messages":[{"role":"system","content":"..."},{"role":"user","content":"..."}],"max_tokens":...,"temperature":...}
         try writer.writeAll("{\"model\":\"");
         try writeJsonEscapedString(writer, self.model);
-        try writer.writeAll("\",\"messages\":[");
-
-        // System message
-        try writer.writeAll("{\"role\":\"system\",\"content\":\"");
+        try writer.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":\"");
         try writeJsonEscapedString(writer, system_prompt);
-        try writer.writeAll("\"},");
-
-        // User message
-        try writer.writeAll("{\"role\":\"user\",\"content\":\"");
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
         try writeJsonEscapedString(writer, user_prompt);
-        try writer.writeAll("\"}");
-
-        try writer.writeAll("],\"max_tokens\":");
+        try writer.writeAll("\"}],\"max_tokens\":");
         try writer.print("{}", .{self.max_tokens});
 
         try writer.writeAll(",\"temperature\":");
@@ -397,19 +391,11 @@ pub const Client = struct {
         // Build: {"model":"...","stream":false,"messages":[{"role":"system","content":"..."},{"role":"user","content":"..."}],"options":{"num_ctx":...}}
         try writer.writeAll("{\"model\":\"");
         try writeJsonEscapedString(writer, self.model);
-        try writer.writeAll("\",\"stream\":false,\"messages\":[");
-
-        // System message
-        try writer.writeAll("{\"role\":\"system\",\"content\":\"");
+        try writer.writeAll("\",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":\"");
         try writeJsonEscapedString(writer, system_prompt);
-        try writer.writeAll("\"},");
-
-        // User message
-        try writer.writeAll("{\"role\":\"user\",\"content\":\"");
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
         try writeJsonEscapedString(writer, user_prompt);
-        try writer.writeAll("\"}");
-
-        try writer.writeAll("],\"options\":{\"num_ctx\":");
+        try writer.writeAll("\"}],\"options\":{\"num_ctx\":");
         try writer.print("{}", .{self.max_tokens});
 
         try writer.writeAll("}}");
@@ -423,6 +409,105 @@ pub const Client = struct {
         return self.chatOpenAI(system_prompt, user_prompt);
     }
 
+    /// Cerebras chat completion (OpenAI-compatible API)
+    fn chatCerebras(self: *const Self, system_prompt: []const u8, user_prompt: []const u8) !ChatResponse {
+        const endpoint_str = if (self.endpoint.len > 0)
+            self.endpoint
+        else
+            "https://api.cerebras.ai/v1/chat/completions";
+
+        var client: http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        // Enhance system prompt with shell-specific context
+        const enhanced_prompt = try self.enhanceSystemPrompt(system_prompt);
+        defer self.allocator.free(enhanced_prompt);
+
+        // Build request body with proper JSON escaping
+        const body = try self.buildCerebrasJson(enhanced_prompt, user_prompt);
+        defer self.allocator.free(body);
+
+        // Build authorization header
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        // Use Zig 0.15 fetch API with std.Io.Writer.Allocating
+        var allocating_writer: std.Io.Writer.Allocating = .init(self.allocator);
+        defer allocating_writer.deinit();
+
+        const result = try client.fetch(.{
+            .location = .{ .url = endpoint_str },
+            .method = .POST,
+            .payload = body,
+            .extra_headers = &.{
+                .{ .name = "Authorization", .value = auth_header },
+                .{ .name = "Content-Type", .value = "application/json" },
+            },
+            .response_writer = &allocating_writer.writer,
+        });
+
+        if (result.status != .ok) {
+            log.err("Cerebras API returned status: {}", .{result.status});
+            return error.NetworkError;
+        }
+
+        const body_bytes = allocating_writer.written();
+
+        // Parse JSON response
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body_bytes, .{});
+        defer parsed.deinit();
+
+        // Extract content from response
+        if (parsed.value.object.get("choices")) |choices| {
+            if (choices.array.items.len > 0) {
+                const first_choice = choices.array.items[0];
+                if (first_choice.object.get("message")) |message| {
+                    if (message.object.get("content")) |content| {
+                        return .{
+                            .content = try self.allocator.dupe(u8, content.string),
+                            .model = try self.allocator.dupe(u8, self.model),
+                            .provider = "cerebras",
+                        };
+                    }
+                }
+            }
+        }
+
+        // Check for error in response
+        if (parsed.value.object.get("error")) |err| {
+            if (err.object.get("message")) |msg| {
+                log.err("Cerebras API error: {s}", .{msg.string});
+            }
+        }
+
+        return error.InvalidResponse;
+    }
+
+    /// Build JSON request body for Cerebras API (OpenAI-compatible format)
+    fn buildCerebrasJson(self: *const Self, system_prompt: []const u8, user_prompt: []const u8) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+
+        const writer = buf.writer(self.allocator);
+
+        // Build: {"model":"...","messages":[{"role":"system","content":"..."},{"role":"user","content":"..."}],"max_tokens":...,"temperature":...}
+        try writer.writeAll("{\"model\":\"");
+        try writeJsonEscapedString(writer, self.model);
+        try writer.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":\"");
+        try writeJsonEscapedString(writer, system_prompt);
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
+        try writeJsonEscapedString(writer, user_prompt);
+        try writer.writeAll("\"}],\"max_tokens\":");
+        try writer.print("{}", .{self.max_tokens});
+
+        try writer.writeAll(",\"temperature\":");
+        try writer.print("{d:.1}", .{self.temperature});
+
+        try writer.writeAll("}");
+
+        return buf.toOwnedSlice(self.allocator);
+    }
+
     fn buildOpenAIJsonStream(self: *const Self, system_prompt: []const u8, user_prompt: []const u8) ![]const u8 {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buf.deinit(self.allocator);
@@ -431,19 +516,11 @@ pub const Client = struct {
 
         try writer.writeAll("{\"model\":\"");
         try writeJsonEscapedString(writer, self.model);
-        try writer.writeAll("\",\"messages\":[");
-
-        // System message
-        try writer.writeAll("{\"role\":\"system\",\"content\":\"");
+        try writer.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":\"");
         try writeJsonEscapedString(writer, system_prompt);
-        try writer.writeAll("\"},");
-
-        // User message
-        try writer.writeAll("{\"role\":\"user\",\"content\":\"");
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
         try writeJsonEscapedString(writer, user_prompt);
-        try writer.writeAll("\"}");
-
-        try writer.writeAll("],\"max_tokens\":");
+        try writer.writeAll("\"}],\"max_tokens\":");
         try writer.print("{}", .{self.max_tokens});
 
         try writer.writeAll(",\"temperature\":");
@@ -716,19 +793,11 @@ pub const Client = struct {
 
         try writer.writeAll("{\"model\":\"");
         try writeJsonEscapedString(writer, self.model);
-        try writer.writeAll("\",\"stream\":true,\"messages\":[");
-
-        // System message
-        try writer.writeAll("{\"role\":\"system\",\"content\":\"");
+        try writer.writeAll("\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"");
         try writeJsonEscapedString(writer, system_prompt);
-        try writer.writeAll("\"},");
-
-        // User message
-        try writer.writeAll("{\"role\":\"user\",\"content\":\"");
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
         try writeJsonEscapedString(writer, user_prompt);
-        try writer.writeAll("\"}");
-
-        try writer.writeAll("],\"options\":{\"num_ctx\":");
+        try writer.writeAll("\"}],\"options\":{\"num_ctx\":");
         try writer.print("{}", .{self.max_tokens});
         try writer.writeAll("}}");
 
@@ -859,6 +928,143 @@ pub const Client = struct {
         return self.chatStreamOpenAI(system_prompt, user_prompt, options);
     }
 
+    fn buildCerebrasJsonStream(self: *const Self, system_prompt: []const u8, user_prompt: []const u8) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+
+        const writer = buf.writer(self.allocator);
+
+        try writer.writeAll("{\"model\":\"");
+        try writeJsonEscapedString(writer, self.model);
+        try writer.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":\"");
+        try writeJsonEscapedString(writer, system_prompt);
+        try writer.writeAll("\"},{\"role\":\"user\",\"content\":\"");
+        try writeJsonEscapedString(writer, user_prompt);
+        try writer.writeAll("\"}],\"max_tokens\":");
+        try writer.print("{}", .{self.max_tokens});
+
+        try writer.writeAll(",\"temperature\":");
+        try writer.print("{d:.1}", .{self.temperature});
+
+        try writer.writeAll(",\"stream\":true}");
+
+        return buf.toOwnedSlice(self.allocator);
+    }
+
+    fn chatStreamCerebras(
+        self: *const Self,
+        system_prompt: []const u8,
+        user_prompt: []const u8,
+        options: StreamOptions,
+    ) !void {
+        const endpoint_str = if (self.endpoint.len > 0)
+            self.endpoint
+        else
+            "https://api.cerebras.ai/v1/chat/completions";
+
+        var client: http.Client = .{ .allocator = self.allocator };
+        defer client.deinit();
+
+        const uri = try Uri.parse(endpoint_str);
+
+        // Enhance system prompt with shell-specific context
+        const enhanced_prompt = try self.enhanceSystemPrompt(system_prompt);
+        defer self.allocator.free(enhanced_prompt);
+
+        // Build request body with streaming enabled
+        const body = try self.buildCerebrasJsonStream(enhanced_prompt, user_prompt);
+        defer self.allocator.free(body);
+
+        // Build authorization header
+        const auth_header = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
+        defer self.allocator.free(auth_header);
+
+        var req = try client.request(.POST, uri, .{
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
+            .extra_headers = &.{
+                .{ .name = "Authorization", .value = auth_header },
+                .{ .name = "Content-Type", .value = "application/json" },
+                .{ .name = "Accept", .value = "text/event-stream" },
+            },
+        });
+        defer req.deinit();
+
+        try req.sendBodyComplete(@constCast(body));
+
+        var response = try req.receiveHead(&.{});
+        if (response.head.status != .ok) {
+            log.err("Cerebras streaming returned status: {}", .{response.head.status});
+            options.callback(.{ .content = "", .done = true });
+            return error.InvalidResponse;
+        }
+
+        var transfer_buffer: [4096]u8 = undefined;
+        const body_reader = response.reader(&transfer_buffer);
+
+        var read_buf: [4096]u8 = undefined;
+        var sse_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer sse_buf.deinit(self.allocator);
+
+        while (true) {
+            if (isCancelled(options.cancelled)) {
+                options.callback(.{ .content = "", .done = true });
+                return;
+            }
+
+            const bytes_read = body_reader.readVec(&.{read_buf[0..]}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => {
+                    log.warn("Cerebras stream read error: {}", .{err});
+                    options.callback(.{ .content = "", .done = true });
+                    return;
+                },
+            };
+            if (bytes_read == 0) continue;
+
+            try sse_buf.appendSlice(self.allocator, read_buf[0..bytes_read]);
+
+            while (true) {
+                if (isCancelled(options.cancelled)) {
+                    options.callback(.{ .content = "", .done = true });
+                    return;
+                }
+
+                const delim = findSseDelimiter(sse_buf.items) orelse break;
+                const event = sse_buf.items[0..delim.index];
+
+                var lines = std.mem.splitScalar(u8, event, '\n');
+                while (lines.next()) |line_raw| {
+                    const line = std.mem.trimRight(u8, line_raw, "\r");
+                    if (!std.mem.startsWith(u8, line, "data:")) continue;
+
+                    const payload = std.mem.trim(u8, line["data:".len..], " \t\r");
+                    if (payload.len == 0) continue;
+
+                    if (std.mem.eql(u8, payload, "[DONE]")) {
+                        options.callback(.{ .content = "", .done = true });
+                        return;
+                    }
+
+                    const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch continue;
+                    defer parsed.deinit();
+
+                    const choices = parsed.value.object.get("choices") orelse continue;
+                    if (choices.array.items.len == 0) continue;
+                    const first_choice = choices.array.items[0];
+                    const delta = first_choice.object.get("delta") orelse continue;
+                    const content = delta.object.get("content") orelse continue;
+                    if (content != .string) continue;
+
+                    options.callback(.{ .content = content.string, .done = false });
+                }
+
+                consumePrefix(&sse_buf, delim.index + delim.len);
+            }
+        }
+
+        options.callback(.{ .content = "", .done = true });
+    }
+
     /// Send a streaming chat completion request
     /// The callback will be invoked for each chunk of the response
     pub fn chatStream(
@@ -884,6 +1090,7 @@ pub const Client = struct {
             .anthropic => return self.chatStreamAnthropic(system_prompt, user_prompt, options),
             .ollama => return self.chatStreamOllama(system_prompt, user_prompt, options),
             .custom => return self.chatStreamCustom(system_prompt, user_prompt, options),
+            .cerebras => return self.chatStreamCerebras(system_prompt, user_prompt, options),
         }
     }
 };
@@ -1022,4 +1229,318 @@ test "StreamChunk done flag semantics" {
     const chunk_partial = StreamChunk{ .content = "hello", .done = false };
     try std.testing.expect(!chunk_partial.done);
     try std.testing.expectEqualStrings("hello", chunk_partial.content);
+}
+
+// ============================================================================
+// Cerebras Unit Tests
+// ============================================================================
+
+test "Provider enum includes cerebras variant" {
+    const provider = Provider.cerebras;
+    try std.testing.expectEqual(Provider.cerebras, provider);
+}
+
+test "Client initialization with Cerebras provider" {
+    const alloc = std.testing.allocator;
+    
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-api-key",
+        "",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    try std.testing.expectEqual(Provider.cerebras, client.provider);
+    try std.testing.expectEqualStrings("test-api-key", client.api_key);
+    try std.testing.expectEqualStrings("llama3.1-8b", client.model);
+    try std.testing.expectEqual(@as(u32, 1000), client.max_tokens);
+    try std.testing.expectEqual(@as(f32, 0.7), client.temperature);
+}
+
+test "buildCerebrasJson creates valid JSON structure" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    const json = try client.buildCerebrasJson("You are a helpful assistant", "Hello, world!");
+    defer alloc.free(json);
+    
+    // Parse the JSON to verify it's valid
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    
+    // Verify structure
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.contains("model"));
+    try std.testing.expect(obj.contains("messages"));
+    try std.testing.expect(obj.contains("max_tokens"));
+    try std.testing.expect(obj.contains("temperature"));
+    
+    // Verify model
+    const model = obj.get("model").?;
+    try std.testing.expectEqualStrings("llama3.1-8b", model.string);
+    
+    // Verify messages array
+    const messages = obj.get("messages").?.array;
+    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
+    
+    // Verify system message
+    const system_msg = messages.items[0].object;
+    try std.testing.expectEqualStrings("system", system_msg.get("role").?.string);
+    try std.testing.expectEqualStrings("You are a helpful assistant", system_msg.get("content").?.string);
+    
+    // Verify user message
+    const user_msg = messages.items[1].object;
+    try std.testing.expectEqualStrings("user", user_msg.get("role").?.string);
+    try std.testing.expectEqualStrings("Hello, world!", user_msg.get("content").?.string);
+}
+
+test "buildCerebrasJson handles JSON special characters" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    const json = try client.buildCerebrasJson("System \"prompt\" with\nnewlines", "User \"prompt\" with\ttabs");
+    defer alloc.free(json);
+    
+    // Verify JSON contains escaped characters
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\\"") != null); // Escaped quotes
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\n") != null); // Escaped newlines
+    try std.testing.expect(std.mem.indexOf(u8, json, "\\t") != null); // Escaped tabs
+}
+
+test "buildCerebrasJsonStream creates valid streaming JSON" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",
+        "llama3.1-8b",
+        2048,
+        0.8,
+    );
+    
+    const json = try client.buildCerebrasJsonStream("System prompt", "User prompt");
+    defer alloc.free(json);
+    
+    // Parse the JSON to verify it's valid
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    
+    // Verify stream is enabled
+    const obj = parsed.value.object;
+    const stream = obj.get("stream").?;
+    try std.testing.expect(stream == .bool);
+    try std.testing.expect(stream.bool);
+    
+    // Verify other fields
+    try std.testing.expectEqualStrings("llama3.1-8b", obj.get("model").?.string);
+    try std.testing.expectEqual(@as(i64, 2048), obj.get("max_tokens").?.integer);
+}
+
+test "Chat response structure for Cerebras" {
+    const alloc = std.testing.allocator;
+    
+    // Simulate a Cerebras API response
+    const mock_response = "{\"id\":\"chatcmpl-123\",\"object\":\"chat.completion\",\"created\":1234567890,\"model\":\"llama3.1-8b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"This is a test response\"},\"finish_reason\":\"stop\"}]}";
+    
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, mock_response, .{});
+    defer parsed.deinit();
+    
+    // Verify we can extract the content
+    const obj = parsed.value.object;
+    const choices = obj.get("choices").?.array;
+    try std.testing.expectEqual(@as(usize, 1), choices.items.len);
+    
+    const first_choice = choices.items[0].object;
+    const message = first_choice.get("message").?.object;
+    const content = message.get("content").?.string;
+    
+    try std.testing.expectEqualStrings("This is a test response", content);
+    try std.testing.expectEqualStrings("llama3.1-8b", obj.get("model").?.string);
+}
+
+test "Cerebras error response handling" {
+    const alloc = std.testing.allocator;
+    
+    // Simulate a Cerebras API error response
+    const mock_error = "{\"error\":{\"message\":\"Invalid API key\",\"type\":\"authentication_error\",\"code\":\"invalid_api_key\"}}";
+    
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, mock_error, .{});
+    defer parsed.deinit();
+    
+    // Verify we can extract the error message
+    const obj = parsed.value.object;
+    const error_obj = obj.get("error").?.object;
+    const message = error_obj.get("message").?.string;
+    
+    try std.testing.expectEqualStrings("Invalid API key", message);
+}
+
+test "Cerebras API endpoint default value" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",  // Empty endpoint should use default
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    // When endpoint is empty, it should resolve to the default Cerebras API endpoint
+    try std.testing.expectEqualStrings("", client.endpoint);
+}
+
+test "Cerebras with custom endpoint" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "https://custom.api.cerebras.ai/v1/chat/completions",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    try std.testing.expectEqualStrings("https://custom.api.cerebras.ai/v1/chat/completions", client.endpoint);
+}
+
+test "StreamChunk for Cerebras streaming response" {
+    // Test streaming chunk with content
+    const chunk_with_content = StreamChunk{ .content = "streaming ", .done = false };
+    try std.testing.expect(!chunk_with_content.done);
+    try std.testing.expectEqualStrings("streaming ", chunk_with_content.content);
+    
+    // Test final chunk
+    const chunk_final = StreamChunk{ .content = "", .done = true };
+    try std.testing.expect(chunk_final.done);
+    try std.testing.expectEqual(@as(usize, 0), chunk_final.content.len);
+}
+
+test "Cerebras model validation" {
+    const models = [_][]const u8{
+        "llama3.1-8b",
+        "llama3.1-70b",
+        "llama3.3-70b",
+    };
+    
+    for (models) |model| {
+        const alloc = std.testing.allocator;
+        const client = Client.init(
+            alloc,
+            Provider.cerebras,
+            "test-key",
+            "",
+            model,
+            1000,
+            0.7,
+        );
+        
+        try std.testing.expectEqualStrings(model, client.model);
+    }
+}
+
+test "buildCerebrasJson with empty prompts" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    const json = try client.buildCerebrasJson("", "");
+    defer alloc.free(json);
+    
+    // Should still produce valid JSON
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    
+    const obj = parsed.value.object;
+    const messages = obj.get("messages").?.array;
+    try std.testing.expectEqual(@as(usize, 2), messages.items.len);
+    
+    // Both messages should have empty content
+    const system_msg = messages.items[0].object;
+    try std.testing.expectEqualStrings("", system_msg.get("content").?.string);
+    
+    const user_msg = messages.items[1].object;
+    try std.testing.expectEqualStrings("", user_msg.get("content").?.string);
+}
+
+test "Cerebras temperature parameter edge cases" {
+    const alloc = std.testing.allocator;
+    
+    // Test minimum temperature (0.0)
+    const client1 = Client.init(alloc, Provider.cerebras, "key", "", "model", 1000, 0.0);
+    const json1 = try client1.buildCerebrasJson("system", "user");
+    defer alloc.free(json1);
+    try std.testing.expect(std.mem.indexOf(u8, json1, "\"temperature\":0.0") != null);
+    
+    // Test maximum temperature (2.0)
+    const client2 = Client.init(alloc, Provider.cerebras, "key", "", "model", 1000, 2.0);
+    const json2 = try client2.buildCerebrasJson("system", "user");
+    defer alloc.free(json2);
+    try std.testing.expect(std.mem.indexOf(u8, json2, "\"temperature\":2.0") != null);
+}
+
+test "Cerebras JSON escaping edge cases" {
+    const alloc = std.testing.allocator;
+    const client = Client.init(
+        alloc,
+        Provider.cerebras,
+        "test-key",
+        "",
+        "llama3.1-8b",
+        1000,
+        0.7,
+    );
+    
+    const test_cases = [_][]const u8{
+        "Backslash: \\",
+        "Quotes: \"hello\"",
+        "Newlines: \nline1\nline2",
+        "Tabs: \tindented",
+        "Carriage return: \r",
+        "Mixed: \"test\"\nwith\ttabs\rand\\backslashes",
+    };
+    
+    for (test_cases) |test_case| {
+        const json = try client.buildCerebrasJson(test_case, test_case);
+        defer alloc.free(json);
+        
+        // Verify JSON is valid
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+        defer parsed.deinit();
+        
+        // Verify the escaped content is preserved
+        const obj = parsed.value.object;
+        const messages = obj.get("messages").?.array;
+        const system_msg = messages.items[0].object;
+        try std.testing.expectEqualStrings(test_case, system_msg.get("content").?.string);
+    }
 }

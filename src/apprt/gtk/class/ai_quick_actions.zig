@@ -110,21 +110,9 @@ pub const QuickActionsPanel = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all action items in the store to prevent memory leaks.
-            // We must: (1) deinit internal allocations, (2) clear store to release refs.
-            // This prevents double-free when GObject finalizes the store.
+            // Clean up all action items - just removeAll, GObject dispose handles item cleanup
             if (priv.actions_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const action_item: *ActionItem = @ptrCast(@alignCast(item));
-                        action_item.deinit(alloc);
-                    }
-                }
-                // Clear store to release references before parent dispose
                 store.removeAll();
             }
 
@@ -144,8 +132,7 @@ pub const QuickActionsPanel = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -161,7 +148,7 @@ pub const QuickActionsPanel = extern struct {
         factory.connectBind(&bindActionItem, null);
 
         // Create grid view
-        const selection = gtk.SingleSelection.new(store.as(gobject.Object));
+        const selection = gtk.SingleSelection.new(store.as(gio.ListModel));
         const grid_view = gtk.GridView.new(selection.as(gtk.SelectionModel), factory);
         grid_view.setMaxColumns(3);
         grid_view.setColumnSpacing(12);

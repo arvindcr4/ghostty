@@ -55,7 +55,25 @@ pub const InlineExplanationTooltip = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &ExampleItem.dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &ExampleItem.finalize);
+            }
+
+            fn dispose(self: *ExampleItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.command.len > 0) {
+                    alloc.free(self.command);
+                    self.command = "";
+                }
+                if (self.description.len > 0) {
+                    alloc.free(self.description);
+                    self.description = "";
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *ExampleItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
@@ -205,16 +223,9 @@ pub const InlineExplanationTooltip = extern struct {
             priv.current_command = null;
         }
 
-        // Clean up all example items
+        // Clean up all example items - just removeAll, GObject dispose handles item cleanup
         if (priv.examples_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const example_item: *ExampleItem = @ptrCast(@alignCast(item));
-                    example_item.deinit(alloc);
-                }
-            }
+            store.removeAll();
         }
 
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));

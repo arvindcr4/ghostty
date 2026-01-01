@@ -2246,6 +2246,7 @@ pub const CAPI = struct {
                 .anthropic => "anthropic",
                 .ollama => "ollama",
                 .custom => "custom",
+                .cerebras => "cerebras",
             },
         };
 

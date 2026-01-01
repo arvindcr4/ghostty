@@ -131,18 +131,10 @@ pub const NotificationCenter = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all notification items
+            // Clean up all notification items - just removeAll, GObject dispose handles item cleanup
             if (priv.notifications_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const notif_item: *NotificationItem = @ptrCast(@alignCast(item));
-                        notif_item.deinit(alloc);
-                    }
-                }
+                store.removeAll();
             }
 
             gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
@@ -161,8 +153,7 @@ pub const NotificationCenter = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -275,16 +266,8 @@ pub const NotificationCenter = extern struct {
     fn clearClicked(button: *gtk.Button, self: *Self) callconv(.c) void {
         _ = button;
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
+        // Just removeAll - GObject dispose handles item cleanup
         if (priv.notifications_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const notif_item: *NotificationItem = @ptrCast(@alignCast(item));
-                    notif_item.deinit(alloc);
-                }
-            }
             store.removeAll();
         }
     }

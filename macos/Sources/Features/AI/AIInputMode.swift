@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import GhosttyKit
 import Speech
+import os
 
 /// AI Input Mode View for macOS
 /// Provides a Warp-like AI assistant interface for command explanation,
@@ -288,14 +289,69 @@ struct AIInputModeView: View {
         isLoading = false
     }
 
+    /// Validate if a command is safe to execute
+    private func isCommandSafe(_ command: String) -> Bool {
+        // Reject empty commands
+        guard !command.isEmpty else { return false }
+
+        // List of dangerous commands that should never be executed
+        let dangerousCommands = [
+            "rm", "dd", "format", "mkfs", "shutdown", "reboot",
+            "halt", "poweroff", "killall", "pkill", "sudo", "su",
+            "chmod", "chown", "curl", "wget", "bash -c", "sh -c"
+        ]
+
+        // Check if command starts with any dangerous command
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        for dangerous in dangerousCommands {
+            if trimmedCommand.hasPrefix(dangerous) {
+                // Allow "skill" as it's different from "kill"
+                if dangerous == "kill" && trimmedCommand.hasPrefix("skill") {
+                    continue
+                }
+                logSecurityEvent("Blocked dangerous command: \(command)")
+                return false
+            }
+        }
+
+        // Reject commands with shell metacharacters that could enable injection
+        let dangerousChars = CharacterSet(charactersIn: "|&;$()`<>{}\\")
+        if command.rangeOfCharacter(from: dangerousChars) != nil {
+            logSecurityEvent("Blocked command with dangerous characters: \(command)")
+            return false
+        }
+
+        return true
+    }
+
+    /// Log security events
+    private func logSecurityEvent(_ message: String) {
+        let logger = Logger(subsystem: "com.ghostty.ai", category: "security")
+        logger.warning("SECURITY: \(message)")
+    }
+
+    /// Show security warning to user
+    private func showSecurityWarning(_ command: String) {
+        // Note: In a real implementation, this would show a UI alert
+        // For now, we just log the event
+        logSecurityEvent("User attempted to execute unsafe command: \(command)")
+    }
+
     private func executeCommands(from response: String) {
         let commands = extractCommands(from: response)
         guard !commands.isEmpty else { return }
         guard let surfaceView else { return }
 
-        Task { @MainActor in
-            guard let surface = surfaceView.surfaceModel else { return }
-            for command in commands {
+        for command in commands {
+            // Validate command safety before execution
+            guard isCommandSafe(command) else {
+                showSecurityWarning(command)
+                continue  // Skip dangerous commands
+            }
+
+            Task { @MainActor in
+                guard let surface = surfaceView.surfaceModel else { return }
+                logSecurityEvent("Executing command: \(command)")
                 surface.sendText(command + "\n")
             }
         }

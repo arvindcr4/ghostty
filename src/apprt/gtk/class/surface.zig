@@ -28,6 +28,7 @@ const ResizeOverlay = @import("resize_overlay.zig").ResizeOverlay;
 const SearchOverlay = @import("search_overlay.zig").SearchOverlay;
 const KeyStateOverlay = @import("key_state_overlay.zig").KeyStateOverlay;
 const ChildExited = @import("surface_child_exited.zig").SurfaceChildExited;
+const AIIntegrationOverlay = @import("ai_integration_overlay.zig").AIIntegrationOverlay;
 const ClipboardConfirmationDialog = @import("clipboard_confirmation_dialog.zig").ClipboardConfirmationDialog;
 const TitleDialog = @import("surface_title_dialog.zig").SurfaceTitleDialog;
 const Window = @import("window.zig").Window;
@@ -594,6 +595,9 @@ pub const Surface = extern struct {
 
         /// The key state overlay
         key_state_overlay: *KeyStateOverlay,
+
+        /// AI integration overlay for command search and suggestions
+        ai_overlay: ?*AIIntegrationOverlay = null,
 
         /// The apprt Surface.
         rt_surface: ApprtSurface = undefined,
@@ -1196,6 +1200,12 @@ pub const Surface = extern struct {
             //   writing, both Kitty and Alacritty have the same behavior. I
             //   know of no way to fix this.
             const im_handled = priv.im_context.as(gtk.IMContext).filterKeypress(event) != 0;
+
+            // Process AI features (command search, inline suggestions)
+            if (priv.ai_overlay) |ai_overlay| {
+                _ = ai_overlay.processKeyPress(keyval, keycode, gtk_mods);
+            }
+
             // log.warn("GTKIM: im_handled={} im_len={} im_composing={}", .{
             //     im_handled,
             //     self.im_len,
@@ -1782,6 +1792,9 @@ pub const Surface = extern struct {
 
         // Initialize our config
         self.propConfig(undefined, null);
+
+        // Initialize AI integration overlay
+        priv.ai_overlay = AIIntegrationOverlay.new(self);
     }
 
     fn initActionMap(self: *Self) void {

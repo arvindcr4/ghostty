@@ -244,18 +244,10 @@ pub const ThemeCustomizationDialog = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
 
-        // Clean up all theme items
+        // Clean up all theme items - just removeAll, GObject dispose handles item cleanup
         if (priv.themes_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const theme_item: *ThemeItem = @ptrCast(@alignCast(item));
-                    theme_item.deinit(alloc);
-                }
-            }
+            store.removeAll();
         }
 
         // Clean up theme suggestions

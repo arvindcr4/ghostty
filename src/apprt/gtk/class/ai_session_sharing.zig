@@ -118,18 +118,10 @@ pub const SessionSharingDialog = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all member items
+            // Clean up all member items - just removeAll, GObject dispose handles item cleanup
             if (priv.members_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const member_item: *MemberItem = @ptrCast(@alignCast(item));
-                        member_item.deinit(alloc);
-                    }
-                }
+                store.removeAll();
             }
 
             // Clean up collaboration manager

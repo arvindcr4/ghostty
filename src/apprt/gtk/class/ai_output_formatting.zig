@@ -103,7 +103,7 @@ pub const OutputFormattingDialog = extern struct {
 
         const format_store = gio.ListStore.new(gobject.Object.getGObjectType());
         // TODO: Populate with format types
-        const format_dropdown = gtk.DropDown.new(format_store.as(gobject.Object), null);
+        const format_dropdown = gtk.DropDown.new(format_store.as(gio.ListModel), null);
         format_dropdown.setHexpand(true);
         priv.format_dropdown = format_dropdown;
 
@@ -217,12 +217,13 @@ pub const OutputFormattingDialog = extern struct {
         }
     }
 
-    fn formatOutput(text: []const u8, format_type: FormatType) ![:0]u8 {
+    fn formatOutput(text: [*:0]const u8, format_type: FormatType) ![*:0]u8 {
         _ = format_type;
         // TODO: Implement actual formatting logic
         // For now, just return the text as-is
         // Use glib.strdup to allocate with GLib allocator, since caller uses glib.free()
-        const result = glib.strdup(text) orelse return error.OutOfMemory;
+        const result = glib.strdup(text);
+        if (@intFromPtr(result) == 0) return error.OutOfMemory;
         return result;
     }
 

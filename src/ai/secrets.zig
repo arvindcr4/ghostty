@@ -97,10 +97,10 @@ pub const SecretRedactor = struct {
 
     /// Detect secrets in text and return their locations
     pub fn detectSecrets(self: *Self, text: []const u8) !std.ArrayList(DetectedSecret) {
-        var secrets = std.ArrayList(DetectedSecret).init(self.alloc);
+        var secrets: std.ArrayList(DetectedSecret) = .{};
         errdefer {
             for (secrets.items) |*s| s.deinit(self.alloc);
-            secrets.deinit();
+            secrets.deinit(self.alloc);
         }
 
         // Check each pattern
@@ -111,7 +111,7 @@ pub const SecretRedactor = struct {
                     const start = i + offset;
                     const end = self.findSecretEnd(text, start, p.secret_type);
 
-                    try secrets.append(.{
+                    try secrets.append(self.alloc, .{
                         .secret_type = p.secret_type,
                         .start = start,
                         .end = end,
@@ -209,7 +209,7 @@ pub const SecretRedactor = struct {
                         }
 
                         if (value_end > value_start) {
-                            try secrets.append(.{
+                            try secrets.append(self.alloc, .{
                                 .secret_type = .generic_secret,
                                 .start = value_start,
                                 .end = value_end,
@@ -225,10 +225,10 @@ pub const SecretRedactor = struct {
 
     /// Redact all detected secrets in text
     pub fn redact(self: *Self, text: []const u8) ![]u8 {
-        const secrets = try self.detectSecrets(text);
+        var secrets = try self.detectSecrets(text);
         defer {
             for (secrets.items) |*s| s.deinit(self.alloc);
-            secrets.deinit();
+            secrets.deinit(self.alloc);
         }
 
         if (secrets.items.len == 0) {
@@ -243,40 +243,40 @@ pub const SecretRedactor = struct {
         }.cmp);
 
         // Build redacted string
-        var result = std.ArrayList(u8).init(self.alloc);
-        errdefer result.deinit();
+        var result: std.ArrayList(u8) = .{};
+        errdefer result.deinit(self.alloc);
 
         var pos: usize = 0;
         for (secrets.items) |secret| {
             // Add text before secret
             if (secret.start > pos) {
-                try result.appendSlice(text[pos..secret.start]);
+                try result.appendSlice(self.alloc, text[pos..secret.start]);
             }
 
             // Add redaction label
-            try result.appendSlice(self.redacted_label);
+            try result.appendSlice(self.alloc, self.redacted_label);
 
             pos = secret.end;
         }
 
         // Add remaining text
         if (pos < text.len) {
-            try result.appendSlice(text[pos..]);
+            try result.appendSlice(self.alloc, text[pos..]);
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.alloc);
     }
 
     /// Get a summary of what types of secrets were detected
     pub fn getSummary(self: *Self, text: []const u8) ![]SecretType {
-        const secrets = try self.detectSecrets(text);
+        var secrets = try self.detectSecrets(text);
         defer {
             for (secrets.items) |*s| s.deinit(self.alloc);
-            secrets.deinit();
+            secrets.deinit(self.alloc);
         }
 
-        var types = std.ArrayList(SecretType).init(self.alloc);
-        errdefer types.deinit();
+        var types: std.ArrayList(SecretType) = .{};
+        errdefer types.deinit(self.alloc);
 
         for (secrets.items) |secret| {
             // Add unique types
@@ -288,11 +288,11 @@ pub const SecretRedactor = struct {
                 }
             }
             if (!found) {
-                try types.append(secret.secret_type);
+                try types.append(self.alloc, secret.secret_type);
             }
         }
 
-        return types.toOwnedSlice();
+        return types.toOwnedSlice(self.alloc);
     }
 };
 
@@ -314,4 +314,94 @@ pub fn containsSecrets(text: []const u8) bool {
     }
 
     return false;
+}
+
+// =============================================================================
+// Unit Tests for Secret Redaction
+// =============================================================================
+
+test "containsSecrets detects OpenAI API key" {
+    try std.testing.expect(containsSecrets("export OPENAI_API_KEY=sk-1234567890abcdef"));
+    try std.testing.expect(containsSecrets("sk-live-abcdef1234567890"));
+}
+
+test "containsSecrets detects AWS credentials" {
+    try std.testing.expect(containsSecrets("AKIA1234567890ABCDEF"));
+    try std.testing.expect(containsSecrets("export AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"));
+}
+
+test "containsSecrets detects GitHub tokens" {
+    try std.testing.expect(containsSecrets("ghp_abcdefgh1234567890ABCDEFGH1234567890"));
+    try std.testing.expect(containsSecrets("gho_abcdefgh1234567890"));
+    try std.testing.expect(containsSecrets("github_pat_1234567890abcdef"));
+}
+
+test "containsSecrets detects JWT tokens" {
+    try std.testing.expect(containsSecrets("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"));
+}
+
+test "containsSecrets detects database URLs" {
+    try std.testing.expect(containsSecrets("postgres://user:pass@localhost:5432/db"));
+    try std.testing.expect(containsSecrets("mysql://root:secret@db.example.com/mydb"));
+    try std.testing.expect(containsSecrets("mongodb://admin:password@cluster.mongodb.net"));
+    try std.testing.expect(containsSecrets("redis://default:authtoken@cache.example.com:6379"));
+}
+
+test "containsSecrets detects private keys" {
+    try std.testing.expect(containsSecrets("-----BEGIN RSA PRIVATE KEY-----\nMIIEpQIBAAK..."));
+    try std.testing.expect(containsSecrets("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1..."));
+}
+
+test "containsSecrets detects bearer tokens" {
+    try std.testing.expect(containsSecrets("Authorization: Bearer abc123token456def"));
+}
+
+test "containsSecrets detects env variable secrets" {
+    try std.testing.expect(containsSecrets("MY_PASSWORD=secret123"));
+    try std.testing.expect(containsSecrets("export API_SECRET=supersecret"));
+    try std.testing.expect(containsSecrets("DATABASE_TOKEN=xyz789"));
+}
+
+test "containsSecrets returns false for safe text" {
+    try std.testing.expect(!containsSecrets("Hello, world!"));
+    try std.testing.expect(!containsSecrets("ls -la /home/user"));
+    try std.testing.expect(!containsSecrets("git commit -m 'update readme'"));
+}
+
+test "SecretRedactor.detectSecrets finds OpenAI key" {
+    var redactor = SecretRedactor.init(std.testing.allocator);
+    var secrets = try redactor.detectSecrets("using key sk-1234567890abcdef for api");
+    defer {
+        for (secrets.items) |*s| s.deinit(std.testing.allocator);
+        secrets.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expect(secrets.items.len > 0);
+    try std.testing.expectEqual(SecretType.api_key, secrets.items[0].secret_type);
+}
+
+test "SecretRedactor.redact replaces secrets with [REDACTED]" {
+    var redactor = SecretRedactor.init(std.testing.allocator);
+    const result = try redactor.redact("my key is sk-secret123 and done");
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-secret123") == null);
+}
+
+test "SecretRedactor.redact preserves non-secret text" {
+    var redactor = SecretRedactor.init(std.testing.allocator);
+    const result = try redactor.redact("hello world");
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "SecretRedactor.getSummary returns unique secret types" {
+    var redactor = SecretRedactor.init(std.testing.allocator);
+    const types = try redactor.getSummary("using sk-key1 and ghp_token and sk-key2");
+    defer std.testing.allocator.free(types);
+
+    // Should have api_key and github_token (deduplicated)
+    try std.testing.expect(types.len == 2);
 }

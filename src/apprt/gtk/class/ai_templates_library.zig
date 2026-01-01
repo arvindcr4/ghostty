@@ -132,21 +132,9 @@ pub const TemplatesLibraryDialog = extern struct {
 
         fn dispose(self: *Self) callconv(.c) void {
             const priv = getPriv(self);
-            const alloc = Application.default().allocator();
 
-            // Clean up all template items in the store to prevent memory leaks.
-            // We must: (1) deinit internal allocations, (2) clear store to release refs.
-            // This prevents double-free when GObject finalizes the store.
+            // Clean up all template items - just removeAll, GObject dispose handles item cleanup
             if (priv.templates_store) |store| {
-                const n = store.getNItems();
-                var i: u32 = 0;
-                while (i < n) : (i += 1) {
-                    if (store.getItem(i)) |item| {
-                        const template_item: *TemplateItem = @ptrCast(@alignCast(item));
-                        template_item.deinit(alloc);
-                    }
-                }
-                // Clear store to release references before parent dispose
                 store.removeAll();
             }
 
@@ -166,8 +154,7 @@ pub const TemplatesLibraryDialog = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -186,7 +173,7 @@ pub const TemplatesLibraryDialog = extern struct {
 
         // Create category filter
         const category_store = gio.ListStore.new(gobject.Object.getGObjectType());
-        const category_filter = gtk.DropDown.new(category_store.as(gobject.Object), null);
+        const category_filter = gtk.DropDown.new(category_store.as(gio.ListModel), null);
         _ = category_filter.connectNotify("selected", &onCategoryChanged, self);
         priv.category_filter = category_filter;
 
@@ -195,7 +182,7 @@ pub const TemplatesLibraryDialog = extern struct {
         factory.connectSetup(&setupTemplateItem, null);
         factory.connectBind(&bindTemplateItem, null);
 
-        const selection = gtk.SingleSelection.new(store.as(gobject.Object));
+        const selection = gtk.SingleSelection.new(store.as(gio.ListModel));
         const list_view = gtk.ListView.new(selection.as(gtk.SelectionModel), factory);
         list_view.setSingleClickActivate(true);
         _ = list_view.connectActivate(&onTemplateActivated, self);
@@ -280,6 +267,9 @@ pub const TemplatesLibraryDialog = extern struct {
         box.append(use_btn.as(gtk.Widget));
 
         item.setChild(box.as(gtk.Widget));
+
+        // Connect signal handler once during setup to prevent leaks on rebind
+        _ = use_btn.connectClicked(&onUseTemplateListItem, item);
     }
 
     fn bindTemplateItem(_: *gtk.SignalListItemFactory, item: *gtk.ListItem, _: ?*anyopaque) callconv(.c) void {
@@ -304,11 +294,14 @@ pub const TemplatesLibraryDialog = extern struct {
                         }
                     }
                 }
-                if (info_box.getNextSibling()) |use_btn| {
-                    _ = use_btn.as(gtk.Button).connectClicked(&onUseTemplate, template_item);
-                }
             }
         }
+    }
+
+    fn onUseTemplateListItem(button: *gtk.Button, list_item: *gtk.ListItem) callconv(.c) void {
+        const entry = list_item.getItem() orelse return;
+        const template_item = @as(*TemplateItem, @ptrCast(@alignCast(entry)));
+        onUseTemplate(button, template_item);
     }
 
     fn onSearchChanged(entry: *gtk.SearchEntry, self: *Self) callconv(.c) void {

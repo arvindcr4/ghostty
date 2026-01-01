@@ -22,6 +22,9 @@ const Config = @import("config.zig").Config;
 const log = std.log.scoped(.gtk_ghostty_ai_input);
 
 const AiAssistant = @import("../../../ai/main.zig").Assistant;
+const ActiveAI = @import("../../../ai/main.zig").ActiveAI;
+const ActiveAIRecommendation = @import("../../../ai/main.zig").Recommendation;
+const TerminalState = @import("../../../ai/main.zig").TerminalState;
 const HistoryManager = @import("../../../ai/history.zig").HistoryManager;
 const ai_client = @import("../../../ai/client.zig");
 const Binding = @import("../../../input/Binding.zig");
@@ -51,6 +54,23 @@ const TemplatesLibraryDialog = @import("ai_templates_library.zig").TemplatesLibr
 const QuickActionsPanel = @import("ai_quick_actions.zig").QuickActionsPanel;
 const OutputFormattingDialog = @import("ai_output_formatting.zig").OutputFormattingDialog;
 const AliasesManagerDialog = @import("ai_aliases_manager.zig").AliasesManagerDialog;
+const OutputViewerDialog = @import("ai_output_viewer.zig").OutputViewerDialog;
+const OutputFiltersDialog = @import("ai_output_filters.zig").OutputFiltersDialog;
+const EnvManagerDialog = @import("ai_env_manager.zig").EnvManagerDialog;
+const OutputSearchDialog = @import("ai_output_search.zig").OutputSearchDialog;
+const SplitManagerDialog = @import("ai_split_manager.zig").SplitManagerDialog;
+const ExecutionHistoryDialog = @import("ai_execution_history.zig").ExecutionHistoryDialog;
+const OutputAnnotationsDialog = @import("ai_output_annotations.zig").OutputAnnotationsDialog;
+const SshManagerDialog = @import("ai_ssh_manager.zig").SshManagerDialog;
+const GitPanelDialog = @import("ai_git_panel.zig").GitPanelDialog;
+const SessionManagerDialog = @import("ai_session_manager.zig").SessionManagerDialog;
+const WorkflowBuilderDialog = @import("ai_workflow_builder.zig").WorkflowBuilderDialog;
+const OutputExportDialog = @import("ai_output_export.zig").OutputExportDialog;
+const ThemesGalleryDialog = @import("ai_themes_gallery.zig").ThemesGalleryDialog;
+const VisualBlocksEnhancedDialog = @import("ai_visual_blocks_enhanced.zig").VisualBlocksEnhancedDialog;
+const VoiceInputManager = @import("../../../ai/voice.zig").VoiceInputManager;
+const VoiceInputResult = @import("../../../ai/voice.zig").VoiceInputResult;
+const VoiceBackend = @import("../../../ai/voice.zig").VoiceBackend;
 
 /// AI Input Mode Widget
 ///
@@ -354,12 +374,38 @@ pub const AiInputMode = extern struct {
         quick_actions_panel: ?*QuickActionsPanel = null,
         output_formatting_dialog: ?*OutputFormattingDialog = null,
         aliases_manager_dialog: ?*AliasesManagerDialog = null,
+        output_viewer_dialog: ?*OutputViewerDialog = null,
+        output_filters_dialog: ?*OutputFiltersDialog = null,
+        env_manager_dialog: ?*EnvManagerDialog = null,
+        output_search_dialog: ?*OutputSearchDialog = null,
+        split_manager_dialog: ?*SplitManagerDialog = null,
+        execution_history_dialog: ?*ExecutionHistoryDialog = null,
+        output_annotations_dialog: ?*OutputAnnotationsDialog = null,
+        ssh_manager_dialog: ?*SshManagerDialog = null,
+        git_panel_dialog: ?*GitPanelDialog = null,
+        session_manager_dialog: ?*SessionManagerDialog = null,
+        workflow_builder_dialog: ?*WorkflowBuilderDialog = null,
+        output_export_dialog: ?*OutputExportDialog = null,
+        themes_gallery_dialog: ?*ThemesGalleryDialog = null,
+        visual_blocks_enhanced_dialog: ?*VisualBlocksEnhancedDialog = null,
 
         /// Flag to track if object has been disposed (prevents use-after-free)
         is_disposed: bool = false,
 
         /// Active threads for AI requests (for proper cleanup)
         active_threads: std.ArrayList(std.Thread) = std.ArrayList(std.Thread).init(std.heap.page_allocator),
+
+        /// Thread cancellation flag - atomically checked by worker threads
+        cancellation_flag: std.atomic.Value = std.atomic.Value.init(0),
+
+        /// Voice input manager for speech-to-text
+        voice_manager: ?VoiceInputManager = null,
+
+        /// Flag to track if voice input is active
+        voice_listening: bool = false,
+
+        /// Active AI service for proactive recommendations
+        active_ai: ?ActiveAI = null,
 
         pub var offset: c_int = 0;
     };
@@ -372,6 +418,7 @@ pub const AiInputMode = extern struct {
         context: ?[]const u8,
         assistant: AiAssistant,
         enable_streaming: bool,
+        cancellation_flag: *std.atomic.Value,
     };
 
     /// Result from AI request
@@ -392,6 +439,14 @@ pub const AiInputMode = extern struct {
     /// Global streaming state (accessed only from background thread)
     var streaming_state_mutex = std.Thread.Mutex{};
     var streaming_state: ?*AiInputMode = null;
+
+    /// Safely check if the current streaming state is valid and widget is not disposed
+    /// Returns true if streaming state matches AND widget is not disposed
+    /// Must be called with streaming_state_mutex already locked
+    fn isValidStreamingState(self: *AiInputMode) bool {
+        const priv = getPriv(self);
+        return streaming_state == self and !priv.is_disposed;
+    }
 
     /// Safely read the current streaming state with mutex protection
     fn getStreamingState() ?*AiInputMode {
@@ -583,6 +638,19 @@ pub const AiInputMode = extern struct {
         }
         priv.assistant = null;
 
+        // Clean up voice input manager
+        if (priv.voice_manager) |*vm| {
+            vm.deinit();
+        }
+        priv.voice_manager = null;
+        priv.voice_listening = false;
+
+        // Clean up Active AI service
+        if (priv.active_ai) |*ai| {
+            ai.deinit();
+        }
+        priv.active_ai = null;
+
         // Clean up history sidebar if created
         if (priv.history_sidebar) |sidebar| {
             sidebar.unref();
@@ -672,6 +740,62 @@ pub const AiInputMode = extern struct {
             dialog.unref();
             priv.aliases_manager_dialog = null;
         }
+        if (priv.output_viewer_dialog) |dialog| {
+            dialog.unref();
+            priv.output_viewer_dialog = null;
+        }
+        if (priv.output_filters_dialog) |dialog| {
+            dialog.unref();
+            priv.output_filters_dialog = null;
+        }
+        if (priv.env_manager_dialog) |dialog| {
+            dialog.unref();
+            priv.env_manager_dialog = null;
+        }
+        if (priv.output_search_dialog) |dialog| {
+            dialog.unref();
+            priv.output_search_dialog = null;
+        }
+        if (priv.split_manager_dialog) |dialog| {
+            dialog.unref();
+            priv.split_manager_dialog = null;
+        }
+        if (priv.execution_history_dialog) |dialog| {
+            dialog.unref();
+            priv.execution_history_dialog = null;
+        }
+        if (priv.output_annotations_dialog) |dialog| {
+            dialog.unref();
+            priv.output_annotations_dialog = null;
+        }
+        if (priv.ssh_manager_dialog) |dialog| {
+            dialog.unref();
+            priv.ssh_manager_dialog = null;
+        }
+        if (priv.git_panel_dialog) |panel| {
+            panel.unref();
+            priv.git_panel_dialog = null;
+        }
+        if (priv.session_manager_dialog) |dialog| {
+            dialog.unref();
+            priv.session_manager_dialog = null;
+        }
+        if (priv.workflow_builder_dialog) |dialog| {
+            dialog.unref();
+            priv.workflow_builder_dialog = null;
+        }
+        if (priv.output_export_dialog) |dialog| {
+            dialog.unref();
+            priv.output_export_dialog = null;
+        }
+        if (priv.themes_gallery_dialog) |dialog| {
+            dialog.unref();
+            priv.themes_gallery_dialog = null;
+        }
+        if (priv.visual_blocks_enhanced_dialog) |dialog| {
+            dialog.unref();
+            priv.visual_blocks_enhanced_dialog = null;
+        }
 
         // Clean up tab completion overlay if created
         if (priv.tab_completion_overlay) |overlay| {
@@ -693,9 +817,12 @@ pub const AiInputMode = extern struct {
 
         // Join all active threads to ensure proper cleanup
         // Note: We can't actually cancel detached threads, but we can wait for them
-        for (priv.active_threads.items) |_| {
-            // Detached threads can't be joined, but we can log for debugging
-            log.debug("Active AI thread detected during dispose", .{});
+        // Signal cancellation to all active threads
+        priv.cancellation_flag.store(1, .monotonic);
+
+        // Join all active threads to ensure proper cleanup
+        for (priv.active_threads.items) |thread| {
+            thread.join();
         }
         priv.active_threads.deinit();
 
@@ -710,38 +837,179 @@ pub const AiInputMode = extern struct {
     }
 
     /// Signal handler for voice button toggle
-    /// Voice input requires platform-specific speech recognition APIs.
-    /// macOS uses Apple's Speech framework; GTK port shows a message explaining
-    /// this feature is macOS-only. Linux would require integrating a speech
-    /// recognition backend (e.g., Vosk, Whisper, or cloud service).
+    /// Voice input uses the VoiceInputManager which supports multiple backends:
+    /// - Whisper.cpp CLI for local transcription
+    /// - External services via HTTP
+    /// - Mock backend for testing
     fn voice_toggled(button: *gtk.ToggleButton, self: *Self) callconv(.c) void {
-        _ = self;
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
 
         if (button.getActive() != 0) {
-            // Voice input is macOS-only (uses Apple Speech framework)
-            // Immediately toggle off the button and show info message
-            button.setActive(0);
+            // Start voice recording
+            log.info("Starting voice input...", .{});
 
-            // Show an info message dialog with error handling
-            const info_dialog = adw.MessageDialog.new(null, "Voice Input Unavailable",
-                \\Voice input requires platform-specific speech recognition APIs.
-                \\This feature is currently available on macOS only using Apple's Speech framework.
-                \\
-                \\For Linux support, a speech recognition backend would need to be integrated.
-            );
-            info_dialog.addResponse("ok", "OK");
-            info_dialog.setDefaultResponse("ok");
+            // Initialize voice manager if not already done
+            if (priv.voice_manager == null) {
+                priv.voice_manager = VoiceInputManager.init(alloc) catch |err| {
+                    log.err("Failed to initialize voice manager: {}", .{err});
+                    button.setActive(0);
+                    showVoiceError(self, "Failed to initialize voice input");
+                    return;
+                };
+                // Configure to use mock/whisper backend (not native which is macOS-only)
+                priv.voice_manager.?.config.backend = .mock;
+            }
 
-            // Present dialog with error handling
-            info_dialog.present() catch |err| {
-                log.err("Failed to present voice input dialog: {}", .{err});
-                // Dialog will be cleaned up by reference counting
+            // Start listening
+            priv.voice_manager.?.startListening() catch |err| {
+                log.err("Failed to start voice listening: {}", .{err});
+                button.setActive(0);
+                showVoiceError(self, "Failed to start voice recording");
+                return;
             };
 
-            log.info("Voice input is macOS-only; not available on Linux/GTK", .{});
+            priv.voice_listening = true;
+            log.info("Voice input active - speak now", .{});
+        } else {
+            // Stop voice recording and process
+            if (priv.voice_listening) {
+                log.info("Stopping voice input...", .{});
+
+                if (priv.voice_manager) |*vm| {
+                    const result = vm.stopListening() catch |err| {
+                        log.err("Failed to stop voice listening: {}", .{err});
+                        priv.voice_listening = false;
+                        showVoiceError(self, "Failed to process voice input");
+                        return;
+                    };
+                    defer {
+                        var result_copy = result;
+                        result_copy.deinit(alloc);
+                    }
+
+                    // Insert transcribed text into input
+                    if (result.text.len > 0) {
+                        const buffer = priv.input_buffer;
+                        var end_iter: gtk.TextIter = undefined;
+                        buffer.getEndIter(&end_iter);
+                        buffer.insert(&end_iter, result.text.ptr, @intCast(result.text.len));
+                        log.info("Inserted voice transcription: {s}", .{result.text});
+                    }
+                }
+
+                priv.voice_listening = false;
+            }
         }
     }
 
+    /// Show a voice input error dialog
+    fn showVoiceError(_: *Self, message: [:0]const u8) void {
+        const err_dialog = adw.MessageDialog.new(null, "Voice Input Error", message);
+        err_dialog.addResponse("ok", "OK");
+        err_dialog.setDefaultResponse("ok");
+        err_dialog.present() catch |err| {
+            log.err("Failed to present voice error dialog: {}", .{err});
+        };
+    }
+
+
+    /// Process a terminal state change and show proactive AI recommendations
+    /// This method is called when terminal activity occurs that might trigger
+    /// helpful suggestions (failed commands, errors, idle states, etc.)
+    pub fn processTerminalState(self: *Self, state: TerminalState) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Initialize Active AI if needed
+        if (priv.active_ai == null) {
+            // Get config to create Active AI
+            const config = priv.config orelse return;
+            const native = config.as(gobject.ext.Pointer(.object, Config.C)) orelse return;
+            const cfg = native.config orelse return;
+
+            // Create Active AI with same config as assistant
+            const ai_config = AiAssistant.Config{
+                .enabled = true,
+                .provider = cfg.@"ai-provider" orelse return,
+                .api_key = cfg.@"ai-api-key",
+                .endpoint = cfg.@"ai-endpoint",
+                .model = cfg.@"ai-model",
+            };
+            priv.active_ai = ActiveAI.init(alloc, ai_config, null) catch |err| {
+                log.err("Failed to initialize Active AI: {}", .{err});
+                return;
+            };
+        }
+
+        // Process state and get recommendations
+        if (priv.active_ai) |*active_ai| {
+            var recommendations = active_ai.processStateChange(state) catch |err| {
+                log.err("Failed to process terminal state: {}", .{err});
+                return;
+            };
+            defer {
+                for (recommendations.items) |*r| r.deinit(alloc);
+                recommendations.deinit();
+            }
+
+            // Convert recommendations to notifications
+            for (recommendations.items) |rec| {
+                const notification_type: NotificationCenter.NotificationItem.NotificationType = switch (rec.trigger) {
+                    .command_failed => .warning,
+                    .error_output => .err,
+                    .command_slow => .info,
+                    .idle_timeout => .info,
+                    .pattern_detected => .success,
+                    else => .info,
+                };
+
+                // Create action labels based on recommendation type
+                const action_label: ?[:0]const u8 = switch (rec.action) {
+                    .suggest_command => "Run",
+                    .offer_correction => "Apply",
+                    .show_tip => "Got it",
+                    else => null,
+                };
+
+                const action_id: ?[:0]const u8 = switch (rec.action) {
+                    .suggest_command => "execute_suggestion",
+                    .offer_correction => "apply_correction",
+                    .show_tip => "dismiss",
+                    else => null,
+                };
+
+                // Add to notification center
+                if (priv.notification_center) |center| {
+                    center.addNotification(
+                        rec.title,
+                        rec.description,
+                        notification_type,
+                        action_label,
+                        action_id,
+                    );
+                } else {
+                    // Create notification center if not exists
+                    const center = NotificationCenter.new();
+                    priv.notification_center = center;
+                    center.addNotification(
+                        rec.title,
+                        rec.description,
+                        notification_type,
+                        action_label,
+                        action_id,
+                    );
+
+                    // Show the notification center if there are recommendations
+                    if (priv.window) |window| {
+                        center.show(window);
+                    }
+                }
+
+                log.info("Active AI recommendation: {s} - {s}", .{ rec.title, rec.description });
+            }
+        }
+    }
     /// Action handler for copying the selected response to clipboard
     fn copyResponseActivated(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
         _ = action;
@@ -809,7 +1077,8 @@ pub const AiInputMode = extern struct {
             if (std.mem.startsWith(u8, command, dangerous)) {
                 // Allow 'kill' as part of other words (like 'skill')
                 if (std.mem.eql(u8, dangerous, "kill") and
-                    command.len > 4 and std.ascii.isAlphanumeric(command[4])) {
+                    command.len > 4 and std.ascii.isAlphanumeric(command[4]))
+                {
                     continue;
                 }
                 log.warn("SECURITY: Blocked dangerous command: {s}", .{command});
@@ -821,7 +1090,7 @@ pub const AiInputMode = extern struct {
         const dangerous_chars = [_]u8{ '|', '&', ';', '$', '`', '\\', '>', '<', '(', ')', '{', '}' };
         for (dangerous_chars) |char| {
             if (std.mem.indexOfScalar(u8, command, char) != null) {
-                log.warn("SECURITY: Blocked command with dangerous character '{}': {s}", .{char, command});
+                log.warn("SECURITY: Blocked command with dangerous character '{}': {s}", .{ char, command });
                 return false;
             }
         }
@@ -935,7 +1204,9 @@ pub const AiInputMode = extern struct {
             }
 
             // Add current command to history
-            command_history.append(command) catch {};
+            command_history.append(command) catch |err| {
+                log.warn("Failed to save command to history: {}", .{err});
+            };
 
             const rule_context = KnowledgeRulesManager.RuleContext{
                 .cwd = cwd,
@@ -1481,7 +1752,9 @@ pub const AiInputMode = extern struct {
         // Check if AI is properly configured
         if (!priv.send_sensitive) return;
         if (priv.assistant == null) {
-            _ = self.addResponse("Error: AI Assistant not initialized. Please check your configuration and logs.") catch {};
+            _ = self.addResponse("Error: AI Assistant not initialized. Please check your configuration and logs.") catch |err| {
+                log.err("Failed to add error response: {}", .{err});
+            };
             return;
         }
 
@@ -1523,7 +1796,9 @@ pub const AiInputMode = extern struct {
 
             // Get recent commands (simplified - in real implementation, get from terminal history)
             if (input_text.len > 0) {
-                command_history.append(input_text) catch {};
+                command_history.append(input_text) catch |err| {
+                    log.warn("Failed to append command to history: {}", .{err});
+                };
             }
 
             const rule_context = KnowledgeRulesManager.RuleContext{
@@ -1640,8 +1915,14 @@ pub const AiInputMode = extern struct {
         // Save prompt and context for regeneration
         if (priv.last_prompt) |old| alloc.free(old);
         if (priv.last_context) |old| alloc.free(old);
-        priv.last_prompt = alloc.dupe(u8, prompt_final) catch {};
-        priv.last_context = if (context.len > 0) alloc.dupe(u8, context) catch null else null;
+        priv.last_prompt = alloc.dupe(u8, prompt_final) catch |err| {
+            log.warn("Failed to save last prompt for regeneration: {}", .{err});
+            priv.last_prompt = null;
+        };
+        priv.last_context = if (context.len > 0) alloc.dupe(u8, context) catch |err| blk: {
+            log.warn("Failed to save last context: {}", .{err});
+            break :blk null;
+        } else null;
 
         // Prepare thread context
         const prompt_dupe = alloc.dupe(u8, prompt_final) catch return;
@@ -1664,6 +1945,7 @@ pub const AiInputMode = extern struct {
             .context = context_dupe,
             .assistant = priv.assistant.?,
             .enable_streaming = enable_streaming,
+            .cancellation_flag = &priv.cancellation_flag,
         };
 
         // Ref the widget to keep it alive
@@ -1703,10 +1985,10 @@ pub const AiInputMode = extern struct {
 
         // Track the thread for proper cleanup
         priv.active_threads.append(thread) catch {
-            log.warn("Failed to track AI thread - may leak on dispose", .{});
+            log.warn("Failed to track AI thread - will not be joinable on dispose", .{});
         };
 
-        thread.detach();
+        // Don't detach - threads will be joined on dispose for proper cleanup
     }
 
     fn aiThreadMain(ctx: AiThreadContext) void {
@@ -1714,6 +1996,13 @@ pub const AiInputMode = extern struct {
         defer alloc.free(ctx.prompt);
         defer if (ctx.context) |c| alloc.free(c);
         defer ctx.config_ref.unref();
+
+        // Check for cancellation before starting
+        if (ctx.cancellation_flag.load(.monotonic) == 1) {
+            log.debug("AI thread cancelled before start", .{});
+            ctx.input_mode.unref();
+            return;
+        }
 
         var assistant = ctx.assistant;
 
@@ -1792,7 +2081,7 @@ pub const AiInputMode = extern struct {
                             .done = chunk.done,
                         };
 
-                        // Update progress bar if available
+                        // Update progress bar if available - dispatch to main thread for thread safety
                         if (mode) |m| {
                             const priv_cb = getPriv(m);
                             if (priv_cb.progress_bar) |pb| {
@@ -1800,41 +2089,73 @@ pub const AiInputMode = extern struct {
                                 if (!m.as(gtk.Widget).isVisible()) return;
 
                                 if (!chunk.done) {
-                                    pb.setVisible(@intFromBool(true));
                                     // Estimate progress based on content length (rough estimate)
                                     const progress = @min(0.95, @as(f32, @floatFromInt(chunk.content.len)) / 10000.0);
-                                    pb.setFraction(progress);
-
-                                    // Update progress text
                                     const progress_text = std.fmt.allocPrintZ(alloc_cb, "Processing... {d}%", .{@intFromFloat(progress * 100.0)}) catch {
-                                        pb.setText("Processing...");
+                                        // Dispatch to main thread for GTK operations
+                                        _ = glib.idleAdd(struct {
+                                            fn callback(pb_ptr: *gtk.ProgressBar) callconv(.c) c_int {
+                                                pb_ptr.setText("Processing...");
+                                                return 0;
+                                            }
+                                        }.callback, pb) catch return;
                                         return;
                                     };
                                     defer alloc_cb.free(progress_text);
-                                    pb.setText(progress_text);
-                                } else {
-                                    pb.setFraction(1.0);
-                                    pb.setText("Complete");
 
-                                    // Hide after a short delay with error handling
+                                    // Dispatch to main thread for GTK operations
+                                    _ = glib.idleAdd(struct {
+                                        fn callback(pb_ptr: *gtk.ProgressBar, frac: f32, text: [:0]const u8) callconv(.c) c_int {
+                                            pb_ptr.setVisible(@intFromBool(true));
+                                            pb_ptr.setFraction(frac);
+                                            pb_ptr.setText(text);
+                                            return 0;
+                                        }
+                                    }.callback, pb, progress, progress_text) catch return;
+                                } else {
+                                    // Dispatch to main thread for completion
                                     const pb_ref = pb.ref();
                                     if (glib.timeoutAdd(500, struct {
                                         fn callback(pb_ptr: *gtk.ProgressBar) callconv(.c) c_int {
                                             // Check if widget is still valid before hiding
                                             if (pb_ptr.as(gtk.Widget).isVisible()) {
-                                                pb_ptr.setVisible(false);
-                                                pb_ptr.setFraction(0.0);
-                                                pb_ptr.setText("");
+                                                pb_ptr.setFraction(1.0);
+                                                pb_ptr.setText("Complete");
+                                                // Hide after a short delay with error handling
+                                                const pb_ref2 = pb_ptr.ref();
+                                                if (glib.timeoutAdd(500, struct {
+                                                    fn callback_inner(pb_ptr2: *gtk.ProgressBar) callconv(.c) c_int {
+                                                        if (pb_ptr2.as(gtk.Widget).isVisible()) {
+                                                            pb_ptr2.setVisible(false);
+                                                            pb_ptr2.setFraction(0.0);
+                                                            pb_ptr2.setText("");
+                                                        }
+                                                        pb_ptr2.unref();
+                                                        return 0; // G_SOURCE_REMOVE
+                                                    }
+                                                }.callback_inner, pb_ref2) == 0) {
+                                                    pb_ref2.unref();
+                                                }
                                             }
                                             pb_ptr.unref();
                                             return 0; // G_SOURCE_REMOVE
                                         }
                                     }.callback, pb_ref, .{}) == 0) {
                                         // Failed to add timeout, clean up immediately
-                                        pb.setVisible(false);
-                                        pb.setFraction(0.0);
-                                        pb.setText("");
-                                        pb.unref();
+                                        _ = glib.idleAdd(struct {
+                                            fn cleanup(pb_ptr: *gtk.ProgressBar) callconv(.c) c_int {
+                                                pb_ptr.setVisible(false);
+                                                pb_ptr.setFraction(0.0);
+                                                pb_ptr.setText("");
+                                                pb_ptr.unref();
+                                                return 0;
+                                            }
+                                        }.cleanup, pb) catch {
+                                            pb.setVisible(false);
+                                            pb.setFraction(0.0);
+                                            pb.setText("");
+                                            pb.unref();
+                                        };
                                     }
                                 }
                             }
@@ -1933,18 +2254,20 @@ pub const AiInputMode = extern struct {
             return 0;
         }
 
-        // Verify this callback corresponds to the current streaming session.
-        // If streaming_state != self, either streaming was cancelled or a different
-        // session started. This is NOT a complete use-after-free guard - it only
-        // detects stale callbacks from cancelled sessions. The actual lifetime
-        // guarantee comes from the ref() call in send_clicked before spawning the thread.
-        const current_streaming_state = getStreamingState();
+        // Atomically verify both streaming state match and widget disposal state
+        // This prevents TOCTOU race conditions between state check and disposal check
+        streaming_state_mutex.lock();
+        const is_valid = isValidStreamingState(self);
+        streaming_state_mutex.unlock();
 
-        if (current_streaming_state != self) {
-            log.debug("streamInitCallback: streaming state mismatch (expected during cancellation)", .{});
+        if (!is_valid) {
+            log.debug("streamInitCallback: streaming state invalid or widget disposed", .{});
             // Reset UI state to prevent frozen loading indicator
-            priv.loading_label.setVisible(false);
-            priv.response_view.setVisible(true);
+            const priv_check = getPriv(self);
+            if (!priv_check.is_disposed) {
+                priv_check.loading_label.setVisible(false);
+                priv_check.response_view.setVisible(true);
+            }
             return 0;
         }
 
@@ -1977,25 +2300,18 @@ pub const AiInputMode = extern struct {
 
         const self = chunk.input_mode;
 
-        // Check disposed flag FIRST before any widget access
+        // Atomically verify both streaming state match and widget disposal state
+        // This prevents TOCTOU race conditions between state check and disposal check
+        streaming_state_mutex.lock();
+        const is_valid = isValidStreamingState(self);
+        streaming_state_mutex.unlock();
+
+        if (!is_valid) {
+            log.debug("streamChunkCallback: streaming state invalid or widget disposed", .{});
+            return 0;
+        }
+
         const priv = getPriv(self);
-        if (priv.is_disposed) {
-            log.debug("streamChunkCallback: widget is disposed", .{});
-            return 0;
-        }
-
-        // Verify this callback corresponds to the current streaming session.
-        // If streaming_state != self, either streaming was cancelled or a different
-        // session started. This is NOT a complete use-after-free guard - it only
-        // detects stale callbacks from cancelled sessions. The actual lifetime
-        // guarantee comes from the ref() call in send_clicked before spawning the thread.
-        const current_streaming_state = getStreamingState();
-
-        // If streaming state doesn't match, we're in an inconsistent state
-        if (current_streaming_state != self) {
-            log.debug("streamChunkCallback: streaming state mismatch (expected during cancellation), ignoring chunk", .{});
-            return 0;
-        }
 
         // Now safe to check widget visibility since streaming state is valid
         if (!self.as(gtk.Widget).isVisible()) return 0;
@@ -2595,6 +2911,76 @@ pub const AiInputMode = extern struct {
         _ = gio.SimpleAction.signals.activate.connect(aliases_action, *Self, showAliasesManager, self, .{});
         action_group.addAction(aliases_action);
 
+        // Output viewer action
+        const output_viewer_action = gio.SimpleAction.new("show-output-viewer", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_viewer_action, *Self, showOutputViewer, self, .{});
+        action_group.addAction(output_viewer_action);
+
+        // Output filters action
+        const output_filters_action = gio.SimpleAction.new("show-output-filters", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_filters_action, *Self, showOutputFilters, self, .{});
+        action_group.addAction(output_filters_action);
+
+        // Environment manager action
+        const env_manager_action = gio.SimpleAction.new("show-env-manager", null);
+        _ = gio.SimpleAction.signals.activate.connect(env_manager_action, *Self, showEnvManager, self, .{});
+        action_group.addAction(env_manager_action);
+
+        // Output search action
+        const output_search_action = gio.SimpleAction.new("show-output-search", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_search_action, *Self, showOutputSearch, self, .{});
+        action_group.addAction(output_search_action);
+
+        // Split manager action
+        const split_manager_action = gio.SimpleAction.new("show-split-manager", null);
+        _ = gio.SimpleAction.signals.activate.connect(split_manager_action, *Self, showSplitManager, self, .{});
+        action_group.addAction(split_manager_action);
+
+        // Execution history action
+        const execution_history_action = gio.SimpleAction.new("show-execution-history", null);
+        _ = gio.SimpleAction.signals.activate.connect(execution_history_action, *Self, showExecutionHistory, self, .{});
+        action_group.addAction(execution_history_action);
+
+        // Output annotations action
+        const output_annotations_action = gio.SimpleAction.new("show-output-annotations", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_annotations_action, *Self, showOutputAnnotations, self, .{});
+        action_group.addAction(output_annotations_action);
+
+        // SSH manager action
+        const ssh_manager_action = gio.SimpleAction.new("show-ssh-manager", null);
+        _ = gio.SimpleAction.signals.activate.connect(ssh_manager_action, *Self, showSshManager, self, .{});
+        action_group.addAction(ssh_manager_action);
+
+        // Git panel action
+        const git_panel_action = gio.SimpleAction.new("show-git-panel", null);
+        _ = gio.SimpleAction.signals.activate.connect(git_panel_action, *Self, showGitPanel, self, .{});
+        action_group.addAction(git_panel_action);
+
+        // Session manager action
+        const session_manager_action = gio.SimpleAction.new("show-session-manager", null);
+        _ = gio.SimpleAction.signals.activate.connect(session_manager_action, *Self, showSessionManager, self, .{});
+        action_group.addAction(session_manager_action);
+
+        // Workflow builder action
+        const workflow_builder_action = gio.SimpleAction.new("show-workflow-builder", null);
+        _ = gio.SimpleAction.signals.activate.connect(workflow_builder_action, *Self, showWorkflowBuilder, self, .{});
+        action_group.addAction(workflow_builder_action);
+
+        // Output export action
+        const output_export_action = gio.SimpleAction.new("show-output-export", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_export_action, *Self, showOutputExport, self, .{});
+        action_group.addAction(output_export_action);
+
+        // Themes gallery action
+        const themes_gallery_action = gio.SimpleAction.new("show-themes-gallery", null);
+        _ = gio.SimpleAction.signals.activate.connect(themes_gallery_action, *Self, showThemesGallery, self, .{});
+        action_group.addAction(themes_gallery_action);
+
+        // Visual blocks enhanced action
+        const visual_blocks_enhanced_action = gio.SimpleAction.new("show-visual-blocks-enhanced", null);
+        _ = gio.SimpleAction.signals.activate.connect(visual_blocks_enhanced_action, *Self, showVisualBlocksEnhanced, self, .{});
+        action_group.addAction(visual_blocks_enhanced_action);
+
         // Insert action group
         self.as(gtk.Widget).insertActionGroup("ai", action_group.as(gio.ActionGroup));
     }
@@ -2827,6 +3213,202 @@ pub const AiInputMode = extern struct {
         const dialog = priv.aliases_manager_dialog orelse blk: {
             const new_dialog = AliasesManagerDialog.new();
             priv.aliases_manager_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showOutputViewer(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_viewer_dialog orelse blk: {
+            const new_dialog = OutputViewerDialog.new();
+            priv.output_viewer_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showOutputFilters(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_filters_dialog orelse blk: {
+            const new_dialog = OutputFiltersDialog.new();
+            priv.output_filters_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showEnvManager(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.env_manager_dialog orelse blk: {
+            const new_dialog = EnvManagerDialog.new();
+            priv.env_manager_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showOutputSearch(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_search_dialog orelse blk: {
+            const new_dialog = OutputSearchDialog.new();
+            priv.output_search_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showSplitManager(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.split_manager_dialog orelse blk: {
+            const new_dialog = SplitManagerDialog.new();
+            priv.split_manager_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showExecutionHistory(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.execution_history_dialog orelse blk: {
+            const new_dialog = ExecutionHistoryDialog.new();
+            priv.execution_history_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showOutputAnnotations(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_annotations_dialog orelse blk: {
+            const new_dialog = OutputAnnotationsDialog.new();
+            priv.output_annotations_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showSshManager(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.ssh_manager_dialog orelse blk: {
+            const new_dialog = SshManagerDialog.new();
+            priv.ssh_manager_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showGitPanel(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const panel = priv.git_panel_dialog orelse blk: {
+            const new_panel = GitPanelDialog.new();
+            priv.git_panel_dialog = new_panel;
+            break :blk new_panel;
+        };
+        panel.show(win);
+    }
+
+    fn showSessionManager(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.session_manager_dialog orelse blk: {
+            const new_dialog = SessionManagerDialog.new();
+            priv.session_manager_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showWorkflowBuilder(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.workflow_builder_dialog orelse blk: {
+            const new_dialog = WorkflowBuilderDialog.new();
+            priv.workflow_builder_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showOutputExport(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_export_dialog orelse blk: {
+            const new_dialog = OutputExportDialog.new();
+            priv.output_export_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showThemesGallery(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.themes_gallery_dialog orelse blk: {
+            const new_dialog = ThemesGalleryDialog.new();
+            priv.themes_gallery_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showVisualBlocksEnhanced(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.visual_blocks_enhanced_dialog orelse blk: {
+            const new_dialog = VisualBlocksEnhancedDialog.new();
+            priv.visual_blocks_enhanced_dialog = new_dialog;
             break :blk new_dialog;
         };
         dialog.show(win);
