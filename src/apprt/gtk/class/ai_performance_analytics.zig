@@ -213,7 +213,8 @@ pub const PerformanceAnalyticsDialog = extern struct {
                 const success_text = std.fmt.allocPrintZ(alloc, "Success: {d:.1}%", .{stats_item.success_rate * 100.0}) catch return;
                 defer alloc.free(success_text);
 
-                if (stats_box.as(gtk.Box).getFirstChild()) |time| {
+                const stats_box_widget = stats_box.as(gtk.Box);
+                if (stats_box_widget.getFirstChild()) |time| {
                     time.as(gtk.Label).setText(time_text);
                     if (time.getNextSibling()) |memory| {
                         memory.as(gtk.Label).setText(memory_text);
@@ -232,7 +233,7 @@ pub const PerformanceAnalyticsDialog = extern struct {
     fn refreshData(button: *gtk.Button, self: *Self) callconv(.c) void {
         _ = button;
         const priv = getPriv(self);
-        const alloc = Application.default().allocator();
+        _ = Application.default().allocator();
 
         // TODO: Implement actual data refresh
         log.info("Refreshing performance data...", .{});
