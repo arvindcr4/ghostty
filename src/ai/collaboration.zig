@@ -383,6 +383,9 @@ pub const CollaborationManager = struct {
         // Clean up cursors
         var cursor_iter = self.cursors.iterator();
         while (cursor_iter.next()) |entry| {
+            // Free the key (user_id:room_id format)
+            self.alloc.free(entry.key_ptr.*);
+            // Free the cursor data
             self.alloc.free(entry.value_ptr.*.user_id);
             self.alloc.free(entry.value_ptr.*.room_id);
             self.alloc.free(entry.value_ptr.*.color);
@@ -671,10 +674,10 @@ pub const CollaborationManager = struct {
         if (!self.config.enable_cursor_sharing) return;
 
         const key = try std.fmt.allocPrint(self.alloc, "{s}:{s}", .{ user_id, room_id });
-        defer self.alloc.free(key);
 
         const gop = try self.cursors.getOrPut(key);
         if (!gop.found_existing) {
+            // Key is now owned by the hashmap, don't free it
             const cursor = try self.alloc.create(SharedCursor);
             cursor.* = .{
                 .user_id = try self.alloc.dupe(u8, user_id),
@@ -686,6 +689,8 @@ pub const CollaborationManager = struct {
             };
             gop.value_ptr.* = cursor;
         } else {
+            // Key already exists, free the duplicate we just created
+            self.alloc.free(key);
             gop.value_ptr.*.line = line;
             gop.value_ptr.*.column = column;
             gop.value_ptr.*.last_updated = std.time.timestamp();

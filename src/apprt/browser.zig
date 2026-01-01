@@ -131,7 +131,10 @@ pub const App = struct {
             self.animation_frame_requested = true;
             CAPI.ghostty_js_request_animation_frame(struct {
                 fn animationFrame() callconv(.c) void {
-                    const app = @as(*App, @ptrCast(@alignCast(global_app_ptr))).?;
+                    const app = global_app_ptr orelse {
+                        log.err("animation frame callback with null app pointer", .{});
+                        return;
+                    };
                     app.animation_frame_requested = false;
                     app.tick() catch |err| {
                         log.err("error in animation frame: {}", .{err});
@@ -234,6 +237,9 @@ pub const Surface = struct {
     cursor_pos: apprt.CursorPos,
     inspector: ?*Inspector = null,
 
+    /// Canvas ID for this surface
+    canvas_id: [:0]const u8,
+
     /// Canvas context for WebGL rendering
     canvas_context: ?*anyopaque = null,
 
@@ -273,6 +279,7 @@ pub const Surface = struct {
             },
             .size = .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
+            .canvas_id = opts.canvas_id,
             .canvas_context = null,
         };
 
@@ -311,7 +318,7 @@ pub const Surface = struct {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
                 config.command = .{ .shell = cmd };
-                config.@"wait-after-command" = true;
+                config.@"wait-after-command" = opts.wait_after_command;
             }
         }
 
@@ -475,7 +482,7 @@ pub const Surface = struct {
         };
 
         // Update canvas size via JavaScript
-        CAPI.ghostty_js_set_canvas_size(self.app.opts.canvas_id.ptr, width, height);
+        CAPI.ghostty_js_set_canvas_size(self.canvas_id.ptr, width, height);
     }
 
     pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) void {
@@ -597,9 +604,7 @@ pub const Inspector = struct {
     surface: *Surface,
 
     pub fn init(surface: *Surface) !Inspector {
-        surface.core_surface.activateInspector() catch |err| {
-            log.err("failed to activate inspector: {}", .{err});
-        };
+        try surface.core_surface.activateInspector();
         return .{ .surface = surface };
     }
 
