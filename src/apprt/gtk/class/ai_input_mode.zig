@@ -1827,6 +1827,15 @@ pub const AiInputMode = extern struct {
                     // Clear the reference but don't free the item (store owns it)
                     priv.streaming_response_item = null;
                 }
+
+                // Convert accumulated content to sentinel-terminated string for auto-execute
+                // IMPORTANT: Must do this BEFORE buffer.deinit() to avoid use-after-free
+                const content_z_for_auto_execute = alloc.dupeZ(u8, buffer.items) catch |err| blk: {
+                    log.err("Failed to allocate string for auto-execute: {}", .{err});
+                    break :blk null;
+                };
+
+                // Now safe to clean up the buffer
                 buffer.deinit();
                 priv.streaming_response = null;
 
@@ -1850,11 +1859,11 @@ pub const AiInputMode = extern struct {
                 self.notify(properties.stop_sensitive.name);
                 self.notify(properties.regenerate_sensitive.name);
 
-                // Convert accumulated content to sentinel-terminated string for auto-execute
-                const content_z_for_auto_execute = alloc.dupeZ(u8, buffer.items) catch return 1;
-                defer alloc.free(content_z_for_auto_execute);
-
-                self.maybeAutoExecuteFromResponse(content_z_for_auto_execute);
+                // Execute auto-execute if we have content
+                if (content_z_for_auto_execute) |content_z| {
+                    defer alloc.free(content_z);
+                    self.maybeAutoExecuteFromResponse(content_z);
+                }
 
                 // Release the ref acquired in send_clicked.
                 // In the streaming path, this is the final callback, so we release here.
