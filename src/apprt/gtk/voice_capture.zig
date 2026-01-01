@@ -291,33 +291,17 @@ pub const VoiceCaptureManager = struct {
     }
 
     fn parseWhisperResponse(self: *VoiceCaptureManager, json: []const u8) ?[]const u8 {
-        // Parse {"text": "..."}
-        const text_key = "\"text\":";
-        const start = std.mem.indexOf(u8, json, text_key) orelse return null;
-        var pos = start + text_key.len;
+        const Response = struct {
+            text: ?[]const u8 = null,
+        };
 
-        // Skip whitespace
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == '\t' or json[pos] == '\n')) : (pos += 1) {}
-        if (pos >= json.len or json[pos] != '"') return null;
-        pos += 1;
+        var parsed = std.json.parseFromSlice(Response, self.allocator, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
 
-        // Find closing quote (properly track escape state for sequences like \\")
-        const text_start = pos;
-        var escaped = false;
-        while (pos < json.len) : (pos += 1) {
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (json[pos] == '\\') {
-                escaped = true;
-            } else if (json[pos] == '"') {
-                break;
-            }
-        }
-        if (pos >= json.len) return null;
-
-        return self.allocator.dupe(u8, json[text_start..pos]) catch null;
+        const text = parsed.value.text orelse return null;
+        return self.allocator.dupe(u8, text) catch null;
     }
 
     fn cleanup(self: *VoiceCaptureManager) void {

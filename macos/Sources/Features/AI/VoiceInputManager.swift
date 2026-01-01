@@ -63,9 +63,11 @@ class VoiceInputManager: ObservableObject {
     /// Note: This runs on the deallocation thread, not @MainActor, so we do
     /// synchronous cleanup of AVAudioEngine resources (which is thread-safe).
     deinit {
-        // Cancel any pending tasks
+        // Cancel any pending tasks and clear references
         debounceTask?.cancel()
+        debounceTask = nil
         silenceTimer?.invalidate()
+        silenceTimer = nil
 
         // Stop audio engine and clean up resources (thread-safe in AVFoundation)
         // This prevents the microphone from staying active after deallocation
@@ -76,7 +78,7 @@ class VoiceInputManager: ObservableObject {
         }
         audioEngine = nil
 
-        // Cancel recognition task
+        // Cancel recognition task and clear references
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
@@ -134,8 +136,9 @@ class VoiceInputManager: ObservableObject {
         silenceTimer?.invalidate()
         silenceTimer = nil
 
-        // Cancel debounce task
+        // Cancel debounce task and clear reference
         debounceTask?.cancel()
+        debounceTask = nil
 
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
