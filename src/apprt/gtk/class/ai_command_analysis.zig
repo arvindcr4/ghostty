@@ -41,8 +41,8 @@ pub const CommandAnalysisDialog = extern struct {
 
     pub const InsightItem = extern struct {
         parent_instance: gobject.Object,
-        title: []const u8,
-        description: []const u8,
+        title: [:0]const u8,
+        description: [:0]const u8,
         severity: InsightSeverity,
 
         pub const Parent = gobject.Object;
@@ -64,15 +64,37 @@ pub const CommandAnalysisDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *InsightItem) callconv(.c) void {
+                // Clean up any resources allocated during instance init
+                // This runs before the object is finalized
+                const alloc = Application.default().allocator();
+                if (self.title.len > 0) {
+                    alloc.free(self.title);
+                    self.title = "";
+                }
+                if (self.description.len > 0) {
+                    alloc.free(self.description);
+                    self.description = "";
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *InsightItem) callconv(.c) void {
+                // Final cleanup after all references are released
+                // This is the last method called before freeing the object
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
         pub fn new(alloc: Allocator, title: []const u8, description: []const u8, severity: InsightSeverity) !*InsightItem {
             const self = gobject.ext.newInstance(InsightItem, .{});
-            self.title = try alloc.dupe(u8, title);
+            self.title = try alloc.dupeZ(u8, title);
             errdefer alloc.free(self.title);
-            self.description = try alloc.dupe(u8, description);
+            self.description = try alloc.dupeZ(u8, description);
             errdefer alloc.free(self.description);
             self.severity = severity;
             return self;
@@ -89,7 +111,26 @@ pub const CommandAnalysisDialog = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+            gobject.Object.virtual_methods.dispose.implement(class, &Class.dispose);
+        }
+
+        fn dispose(self: *Self) callconv(.c) void {
+            const priv = getPriv(self);
+            const alloc = Application.default().allocator();
+
+            // Clean up all insight items
+            if (priv.insights_store) |store| {
+                const n = store.getNItems();
+                var i: u32 = 0;
+                while (i < n) : (i += 1) {
+                    if (store.getItem(i)) |item| {
+                        const insight_item: *InsightItem = @ptrCast(@alignCast(item));
+                        insight_item.deinit(alloc);
+                    }
+                }
+            }
+
+            gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
         }
 
         pub const as = C.Class.as;
@@ -259,24 +300,6 @@ pub const CommandAnalysisDialog = extern struct {
         }
     }
 
-    fn dispose(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        const alloc = Application.default().allocator();
-
-        // Clean up all insight items
-        if (priv.insights_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const insight_item: *InsightItem = @ptrCast(@alignCast(item));
-                    insight_item.deinit(alloc);
-                }
-            }
-        }
-
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
-    }
 
     pub fn show(self: *Self, parent: *Window) void {
         self.as(adw.Window).setTransientFor(parent.as(gtk.Window));

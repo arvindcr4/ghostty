@@ -59,7 +59,33 @@ pub const ThemeCustomizationDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *ThemeItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.name.len > 0) {
+                    alloc.free(self.name);
+                    self.name = "";
+                }
+                if (self.description.len > 0) {
+                    alloc.free(self.description);
+                    self.description = "";
+                }
+                if (self.colors.len > 0) {
+                    alloc.free(self.colors);
+                    self.colors = "";
+                }
+                if (self.preview_image) |img| {
+                    alloc.free(img);
+                    self.preview_image = null;
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *ThemeItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 

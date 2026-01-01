@@ -64,8 +64,7 @@ pub const ExportImportDialog = extern struct {
 
     pub fn new() *Self {
         const self = gobject.ext.newInstance(Self, .{});
-        _ = self.refSink();
-        return self.ref();
+        return self.refSink();
     }
 
     fn init(self: *Self) callconv(.c) void {
@@ -76,9 +75,9 @@ pub const ExportImportDialog = extern struct {
         self.as(adw.MessageDialog).setModal(@intFromBool(true));
 
         // Add action buttons
-        self.addResponse("export", "Export");
-        self.addResponse("import", "Import");
-        self.addResponse("cancel", "Cancel");
+        self.as(adw.MessageDialog).addResponse("export", "Export");
+        self.as(adw.MessageDialog).addResponse("import", "Import");
+        self.as(adw.MessageDialog).addResponse("cancel", "Cancel");
     }
 
     fn dispose(self: *Self) callconv(.c) void {
@@ -149,6 +148,8 @@ pub const ExportImportDialog = extern struct {
     }
 
     pub fn showImport(self: *Self, parent: *Window) void {
+        const priv = getPriv(self);
+
         const chooser = gtk.FileChooserNative.new(
             "Import Data",
             parent.as(gtk.Window),
@@ -156,6 +157,7 @@ pub const ExportImportDialog = extern struct {
             "Import",
             "Cancel",
         );
+        priv.file_chooser = chooser;
 
         // Add JSON filter
         const filter_json = gtk.FileFilter.new();
@@ -168,18 +170,21 @@ pub const ExportImportDialog = extern struct {
     }
 
     fn onImportResponse(chooser: *gtk.FileChooserNative, response_id: c_int, self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
         if (response_id == gtk.ResponseType.accept) {
             if (chooser.getFile()) |file| {
                 defer file.unref();
                 const path = file.getPath() orelse {
                     log.err("Failed to get file path", .{});
                     chooser.destroy();
+                    priv.file_chooser = null;
                     return;
                 };
                 self.importFromFile(path);
             }
         }
         chooser.destroy();
+        priv.file_chooser = null;
     }
 
     fn importFromFile(self: *Self, path: []const u8) void {

@@ -193,7 +193,9 @@ pub const KeyboardShortcutsDialog = extern struct {
         const priv = getPriv(self);
         const alloc = Application.default().allocator();
 
-        // Clean up all ShortcutItem items in the store to prevent memory leaks
+        // Clean up all ShortcutItem items in the store to prevent memory leaks.
+        // We must: (1) deinit internal allocations, (2) clear store to release refs.
+        // This prevents double-free when GObject finalizes the store.
         if (priv.shortcuts_store) |store| {
             const n = store.getNItems();
             var i: u32 = 0;
@@ -203,6 +205,8 @@ pub const KeyboardShortcutsDialog = extern struct {
                     shortcut_item.deinit(alloc);
                 }
             }
+            // Clear store to release references before parent dispose
+            store.removeAll();
         }
 
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));

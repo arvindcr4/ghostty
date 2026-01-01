@@ -39,9 +39,9 @@ pub const TabCompletionOverlay = extern struct {
 
     pub const CompletionItem = extern struct {
         parent_instance: gobject.Object,
-        text: []const u8,
-        description: []const u8,
-        icon_name: ?[]const u8 = null,
+        text: [:0]const u8,
+        description: [:0]const u8,
+        icon_name: ?[:0]const u8 = null,
         confidence: f32 = 0.0,
 
         pub const Parent = gobject.Object;
@@ -62,12 +62,12 @@ pub const TabCompletionOverlay = extern struct {
 
         pub fn new(alloc: Allocator, text: []const u8, description: []const u8, icon_name: ?[]const u8, confidence: f32) !*CompletionItem {
             const self = gobject.ext.newInstance(CompletionItem, .{});
-            self.text = try alloc.dupe(u8, text);
+            self.text = try alloc.dupeZ(u8, text);
             errdefer alloc.free(self.text);
-            self.description = try alloc.dupe(u8, description);
+            self.description = try alloc.dupeZ(u8, description);
             errdefer alloc.free(self.description);
             if (icon_name) |icon| {
-                self.icon_name = try alloc.dupe(u8, icon);
+                self.icon_name = try alloc.dupeZ(u8, icon);
                 errdefer alloc.free(self.icon_name);
             }
             self.confidence = confidence;
@@ -281,7 +281,17 @@ pub const TabCompletionOverlay = extern struct {
 
     pub fn clear(self: *Self) void {
         const priv = getPriv(self);
+        const alloc = Application.default().allocator();
         if (priv.completions_store) |store| {
+            // Free all items before removing
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const completion_item: *CompletionItem = @ptrCast(@alignCast(item));
+                    completion_item.deinit(alloc);
+                }
+            }
             store.removeAll();
         }
         priv.selected_index = 0;

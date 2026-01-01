@@ -38,12 +38,12 @@ pub const NotificationCenter = extern struct {
 
     pub const NotificationItem = extern struct {
         parent_instance: gobject.Object,
-        title: []const u8,
-        message: []const u8,
+        title: [:0]const u8,
+        message: [:0]const u8,
         timestamp: i64,
         notification_type: NotificationItem.NotificationType,
-        action_label: ?[]const u8 = null,
-        action_id: ?[]const u8 = null,
+        action_label: ?[:0]const u8 = null,
+        action_id: ?[:0]const u8 = null,
 
         pub const Parent = gobject.Object;
         pub const getGObjectType = gobject.ext.defineClass(NotificationItem, .{
@@ -64,25 +64,51 @@ pub const NotificationCenter = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *NotificationItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.title.len > 0) {
+                    alloc.free(self.title);
+                    self.title = "";
+                }
+                if (self.message.len > 0) {
+                    alloc.free(self.message);
+                    self.message = "";
+                }
+                if (self.action_label) |label| {
+                    alloc.free(label);
+                    self.action_label = null;
+                }
+                if (self.action_id) |id| {
+                    alloc.free(id);
+                    self.action_id = null;
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *NotificationItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
         pub fn new(alloc: Allocator, title: []const u8, message: []const u8, notification_type: NotificationItem.NotificationType, action_label: ?[]const u8, action_id: ?[]const u8) !*NotificationItem {
             const self = gobject.ext.newInstance(NotificationItem, .{});
-            self.title = try alloc.dupe(u8, title);
+            self.title = try alloc.dupeZ(u8, title);
             errdefer alloc.free(self.title);
-            self.message = try alloc.dupe(u8, message);
+            self.message = try alloc.dupeZ(u8, message);
             errdefer alloc.free(self.message);
             self.timestamp = std.time.timestamp();
             self.notification_type = notification_type;
             if (action_label) |label| {
-                self.action_label = try alloc.dupe(u8, label);
-                errdefer alloc.free(self.action_label);
+                self.action_label = try alloc.dupeZ(u8, label);
+                errdefer alloc.free(self.action_label.?);
             }
             if (action_id) |id| {
-                self.action_id = try alloc.dupe(u8, id);
-                errdefer alloc.free(self.action_id);
+                self.action_id = try alloc.dupeZ(u8, id);
+                errdefer alloc.free(self.action_id.?);
             }
             return self;
         }
@@ -100,8 +126,28 @@ pub const NotificationCenter = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+            gobject.Object.virtual_methods.dispose.implement(class, &NotificationCenter.disposeMethod);
         }
+    };
+
+    fn disposeMethod(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up all notification items
+        if (priv.notifications_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const notif_item: *NotificationItem = @ptrCast(@alignCast(item));
+                    notif_item.deinit(alloc);
+                }
+            }
+        }
+
+        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+    }
 
         pub const as = C.Class.as;
     };
@@ -207,21 +253,22 @@ pub const NotificationCenter = extern struct {
             if (title.getNextSibling()) |message| {
                 message.as(gtk.Label).setText(notif_item.message);
                 if (message.getNextSibling()) |timestamp| {
-                    const time_str = formatTimestamp(notif_item.timestamp);
+                    var time_buf: [64]u8 = undefined;
+                    const time_str = formatTimestamp(time_buf[0..], notif_item.timestamp);
                     timestamp.as(gtk.Label).setText(time_str);
                 }
             }
         }
     }
 
-    fn formatTimestamp(timestamp: i64) []const u8 {
+    fn formatTimestamp(buf: []u8, timestamp: i64) [:0]const u8 {
         // Simple timestamp formatting - could be improved
         const now = std.time.timestamp();
         const diff = now - timestamp;
         if (diff < 60) return "Just now";
         if (diff < 3600) {
             const minutes = diff / 60;
-            return std.fmt.allocPrintZ(std.heap.page_allocator, "{d} minutes ago", .{minutes}) catch "Recently";
+            return std.fmt.bufPrintZ(buf, "{d} minutes ago", .{minutes}) catch "Recently";
         }
         return "Earlier";
     }
@@ -229,16 +276,7 @@ pub const NotificationCenter = extern struct {
     fn clearClicked(button: *gtk.Button, self: *Self) callconv(.c) void {
         _ = button;
         const priv = getPriv(self);
-        if (priv.notifications_store) |store| {
-            store.removeAll();
-        }
-    }
-
-    fn dispose(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
         const alloc = Application.default().allocator();
-
-        // Clean up all notification items
         if (priv.notifications_store) |store| {
             const n = store.getNItems();
             var i: u32 = 0;
@@ -248,10 +286,10 @@ pub const NotificationCenter = extern struct {
                     notif_item.deinit(alloc);
                 }
             }
+            store.removeAll();
         }
-
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
     }
+
 
     pub fn addNotification(self: *Self, title: []const u8, message: []const u8, notification_type: NotificationItem.NotificationType, action_label: ?[]const u8, action_id: ?[]const u8) void {
         const priv = getPriv(self);

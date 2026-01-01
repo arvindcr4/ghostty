@@ -39,7 +39,7 @@ pub const PerformanceAnalyticsDialog = extern struct {
 
     pub const CommandStatsItem = extern struct {
         parent_instance: gobject.Object,
-        command: []const u8,
+        command: [:0]const u8,
         execution_time_ms: u64,
         memory_usage_kb: u64,
         cpu_percent: f32,
@@ -58,13 +58,27 @@ pub const PerformanceAnalyticsDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *CommandStatsItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.command.len > 0) {
+                    alloc.free(self.command);
+                    self.command = "";
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *CommandStatsItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
         pub fn new(alloc: Allocator, command: []const u8, execution_time_ms: u64, memory_usage_kb: u64, cpu_percent: f32, success_rate: f32, run_count: u32) !*CommandStatsItem {
             const self = gobject.ext.newInstance(CommandStatsItem, .{});
-            self.command = try alloc.dupe(u8, command);
+            self.command = try alloc.dupeZ(u8, command);
             errdefer alloc.free(self.command);
             self.execution_time_ms = execution_time_ms;
             self.memory_usage_kb = memory_usage_kb;

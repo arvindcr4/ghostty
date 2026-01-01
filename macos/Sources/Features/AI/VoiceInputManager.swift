@@ -76,16 +76,16 @@ class VoiceInputManager: ObservableObject {
             debounce.value?.cancel()
             speechTask.value?.cancel()
             timer.value?.invalidate()
-            request.value?.endAudio()
 
             engine.value?.stop()
             engine.value?.inputNode.removeTap(onBus: 0)
+            request.value?.endAudio()
         }
 
         if Thread.isMainThread {
             cleanup()
         } else {
-            DispatchQueue.main.async(execute: cleanup)
+            DispatchQueue.main.sync(execute: cleanup)
         }
     }
 

@@ -59,7 +59,33 @@ pub const SessionSharingDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *MemberItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.name.len > 0) {
+                    alloc.free(self.name);
+                    self.name = "";
+                }
+                if (self.email.len > 0) {
+                    alloc.free(self.email);
+                    self.email = "";
+                }
+                if (self.role.len > 0) {
+                    alloc.free(self.role);
+                    self.role = "";
+                }
+                if (self.cursor_position) |pos| {
+                    alloc.free(pos);
+                    self.cursor_position = null;
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *MemberItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
@@ -87,8 +113,33 @@ pub const SessionSharingDialog = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+            gobject.Object.virtual_methods.dispose.implement(class, &SessionSharingDialog.disposeMethod);
         }
+    };
+
+    fn disposeMethod(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up all member items
+        if (priv.members_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const member_item: *MemberItem = @ptrCast(@alignCast(item));
+                    member_item.deinit(alloc);
+                }
+            }
+        }
+
+        // Clean up collaboration manager
+        if (priv.collaboration_manager) |*manager| {
+            manager.deinit();
+        }
+
+        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+    }
 
         pub const as = C.Class.as;
     };
@@ -240,29 +291,6 @@ pub const SessionSharingDialog = extern struct {
         }
     }
 
-    fn dispose(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        const alloc = Application.default().allocator();
-
-        // Clean up all member items
-        if (priv.members_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const member_item: *MemberItem = @ptrCast(@alignCast(item));
-                    member_item.deinit(alloc);
-                }
-            }
-        }
-
-        // Clean up collaboration manager
-        if (priv.collaboration_manager) |*manager| {
-            manager.deinit();
-        }
-
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
-    }
 
     pub fn show(self: *Self, parent: *Window) void {
         self.as(adw.PreferencesWindow).setTransientFor(parent.as(gtk.Window));

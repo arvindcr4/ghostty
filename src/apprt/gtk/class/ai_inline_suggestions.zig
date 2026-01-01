@@ -38,8 +38,8 @@ pub const InlineSuggestions = extern struct {
 
     pub const SuggestionItem = extern struct {
         parent_instance: gobject.Object,
-        command: []const u8,
-        description: []const u8,
+        command: [:0]const u8,
+        description: [:0]const u8,
         confidence: f32,
 
         pub const Parent = gobject.Object;
@@ -54,15 +54,33 @@ pub const InlineSuggestions = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+            }
+
+            fn dispose(self: *SuggestionItem) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                if (self.command.len > 0) {
+                    alloc.free(self.command);
+                    self.command = "";
+                }
+                if (self.description.len > 0) {
+                    alloc.free(self.description);
+                    self.description = "";
+                }
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
+            }
+
+            fn finalize(self: *SuggestionItem) callconv(.c) void {
+                gobject.Object.virtual_methods.finalize.call(ItemClass.parent, self);
             }
         };
 
         pub fn new(alloc: Allocator, command: []const u8, description: []const u8, confidence: f32) !*SuggestionItem {
             const self = gobject.ext.newInstance(SuggestionItem, .{});
-            self.command = try alloc.dupe(u8, command);
+            self.command = try alloc.dupeZ(u8, command);
             errdefer alloc.free(self.command);
-            self.description = try alloc.dupe(u8, description);
+            self.description = try alloc.dupeZ(u8, description);
             errdefer alloc.free(self.description);
             self.confidence = confidence;
             return self;
@@ -79,11 +97,27 @@ pub const InlineSuggestions = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
+            gobject.Object.virtual_methods.dispose.implement(class, &InlineSuggestions.disposeMethod);
+        }
+    };
+
+    fn disposeMethod(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up query string
+        if (priv.current_query) |query| {
+            alloc.free(query);
+            priv.current_query = null;
         }
 
-        pub const as = C.Class.as;
-    };
+        // Clean up all suggestion items
+        if (priv.suggestions_store) |store| {
+            store.removeAll();
+        }
+
+        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+    }
 
     pub const getGObjectType = gobject.ext.defineClass(Self, .{
         .name = "GhosttyInlineSuggestions",
@@ -171,30 +205,6 @@ pub const InlineSuggestions = extern struct {
         // This will be implemented when integrating with the input view
     }
 
-    fn dispose(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        const alloc = Application.default().allocator();
-
-        // Clean up query string
-        if (priv.current_query) |query| {
-            alloc.free(query);
-            priv.current_query = null;
-        }
-
-        // Clean up all suggestion items
-        if (priv.suggestions_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const sugg_item: *SuggestionItem = @ptrCast(@alignCast(item));
-                    sugg_item.deinit(alloc);
-                }
-            }
-        }
-
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
-    }
 
     pub fn updateSuggestions(self: *Self, query: []const u8, suggestions: []const struct { command: []const u8, description: []const u8, confidence: f32 }) void {
         const priv = getPriv(self);
@@ -202,14 +212,6 @@ pub const InlineSuggestions = extern struct {
 
         // Clear existing suggestions
         if (priv.suggestions_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const sugg_item: *SuggestionItem = @ptrCast(@alignCast(item));
-                    sugg_item.deinit(alloc);
-                }
-            }
             store.removeAll();
         }
 

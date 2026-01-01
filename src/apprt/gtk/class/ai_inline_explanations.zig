@@ -40,8 +40,8 @@ pub const InlineExplanationTooltip = extern struct {
 
     pub const ExampleItem = extern struct {
         parent_instance: gobject.Object,
-        command: []const u8,
-        description: []const u8,
+        command: [:0]const u8,
+        description: [:0]const u8,
 
         pub const Parent = gobject.Object;
         pub const getGObjectType = gobject.ext.defineClass(ExampleItem, .{
@@ -61,9 +61,9 @@ pub const InlineExplanationTooltip = extern struct {
 
         pub fn new(alloc: Allocator, command: []const u8, description: []const u8) !*ExampleItem {
             const self = gobject.ext.newInstance(ExampleItem, .{});
-            self.command = try alloc.dupe(u8, command);
+            self.command = try alloc.dupeZ(u8, command);
             errdefer alloc.free(self.command);
-            self.description = try alloc.dupe(u8, description);
+            self.description = try alloc.dupeZ(u8, description);
             errdefer alloc.free(self.description);
             return self;
         }
@@ -111,8 +111,8 @@ pub const InlineExplanationTooltip = extern struct {
         box.setMarginEnd(12);
         box.setMarginTop(12);
         box.setMarginBottom(12);
-        box.setMinContentWidth(400);
-        box.setMaxContentWidth(600);
+        // Set minimum width (gtk.Box doesn't have setMinContentWidth, use setSizeRequest)
+        box.as(gtk.Widget).setSizeRequest(400, -1);
 
         // Title
         const title_label = gtk.Label.new("");

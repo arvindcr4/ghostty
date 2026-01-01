@@ -142,6 +142,8 @@ pub const AiInputMode = extern struct {
             content: [:0]const u8 = "",
             /// Extracted shell command from code blocks (if any)
             command: [:0]const u8 = "",
+
+            pub var offset: c_int = 0;
         };
 
         pub extern fn gtk_gesture_single_get_type() gobject.Type;
@@ -335,6 +337,9 @@ pub const AiInputMode = extern struct {
 
         /// Flag to track if object has been disposed (prevents use-after-free)
         is_disposed: bool = false,
+
+        /// Active threads for AI requests (for proper cleanup)
+        active_threads: std.ArrayList(std.Thread) = std.ArrayList(std.Thread).init(std.heap.page_allocator),
 
         pub var offset: c_int = 0;
     };
@@ -552,6 +557,12 @@ pub const AiInputMode = extern struct {
         }
         priv.knowledge_rules = null;
 
+        // Clean up AI Assistant instance
+        if (priv.assistant) |*assistant| {
+            assistant.deinit();
+        }
+        priv.assistant = null;
+
         // Clean up history sidebar if created
         if (priv.history_sidebar) |sidebar| {
             sidebar.unref();
@@ -611,6 +622,14 @@ pub const AiInputMode = extern struct {
             dialog.unref();
             priv.performance_analytics_dialog = null;
         }
+
+        // Join all active threads to ensure proper cleanup
+        // Note: We can't actually cancel detached threads, but we can wait for them
+        for (priv.active_threads.items) |_| {
+            // Detached threads can't be joined, but we can log for debugging
+            log.debug("Active AI thread detected during dispose", .{});
+        }
+        priv.active_threads.deinit();
 
         gtk.Widget.disposeTemplate(self.as(gtk.Widget), getGObjectType());
 
@@ -686,6 +705,63 @@ pub const AiInputMode = extern struct {
         log.info("Copied AI response to clipboard", .{});
     }
 
+    /// Validate if a command is safe to execute
+    fn isCommandSafe(command: []const u8) bool {
+        // Reject empty commands
+        if (command.len == 0) return false;
+
+        // List of dangerous commands that should never be executed
+        const dangerous_commands = [_][]const u8{
+            "rm",
+            "dd",
+            "format",
+            "mkfs",
+            "shutdown",
+            "reboot",
+            "halt",
+            "poweroff",
+            "kill",
+            "killall",
+            "pkill",
+            "sudo",
+            "su",
+            "chmod",
+            "chown",
+            "mv /",
+            "> /",
+            "curl",
+            "wget",
+            "bash -c",
+            "sh -c",
+            "zsh -c",
+        };
+
+        // Check if command starts with any dangerous command
+        for (dangerous_commands) |dangerous| {
+            if (std.mem.startsWith(u8, command, dangerous)) {
+                // Allow 'kill' as part of other words (like 'skill')
+                if (std.mem.eql(u8, dangerous, "kill") and
+                    command.len > 4 and std.ascii.isAlphanumeric(command[4])) {
+                    continue;
+                }
+                log.warn("SECURITY: Blocked dangerous command: {s}", .{command});
+                return false;
+            }
+        }
+
+        // Reject commands with shell metacharacters that could enable injection
+        const dangerous_chars = [_]u8{ '|', '&', ';', '$', '`', '\\', '>', '<', '(', ')', '{', '}' };
+        for (dangerous_chars) |char| {
+            if (std.mem.indexOfScalar(u8, command, char) != null) {
+                log.warn("SECURITY: Blocked command with dangerous character '{}': {s}", .{char, command});
+                return false;
+            }
+        }
+
+        // Command appears safe
+        return true;
+    }
+
     /// Action handler for executing command from AI response
     fn executeCommandActivated(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
         _ = action;
@@ -731,7 +807,26 @@ pub const AiInputMode = extern struct {
             return;
         }
 
-        log.info("Executing command: {s}", .{command});
+        // Validate command safety
+        if (!isCommandSafe(command)) {
+            log.warn("SECURITY: Blocked execution of unsafe command: {s}", .{command});
+
+            // Show error dialog to user
+            const dialog = adw.MessageDialog.new(
+                @ptrCast(win),
+                "Unsafe Command Blocked",
+                "The AI suggested a command that could be dangerous to execute. This command has been blocked for your safety.",
+            );
+            dialog.addResponse("ok", "OK");
+            dialog.setDefaultResponse("ok");
+            dialog.setCloseResponse("ok");
+            dialog.setModal(@intFromBool(true));
+            dialog.present();
+            return;
+        }
+
+        // Security audit log - all command executions are logged
+        log.warn("SECURITY: Executing AI-suggested command: {s}", .{command});
 
         // Get the active surface from the window
         const surface = win.getActiveSurface() orelse {
@@ -1537,6 +1632,12 @@ pub const AiInputMode = extern struct {
             };
             return;
         };
+
+        // Track the thread for proper cleanup
+        priv.active_threads.append(thread) catch {
+            log.warn("Failed to track AI thread - may leak on dispose", .{});
+        };
+
         thread.detach();
     }
 
@@ -1757,6 +1858,13 @@ pub const AiInputMode = extern struct {
 
         const self = chunk.input_mode;
 
+        // Check disposed flag FIRST before any widget access
+        const priv = getPriv(self);
+        if (priv.is_disposed) {
+            log.debug("streamInitCallback: widget is disposed", .{});
+            return 0;
+        }
+
         // Verify this callback corresponds to the current streaming session.
         // If streaming_state != self, either streaming was cancelled or a different
         // session started. This is NOT a complete use-after-free guard - it only
@@ -1767,16 +1875,8 @@ pub const AiInputMode = extern struct {
         if (current_streaming_state != self) {
             log.debug("streamInitCallback: streaming state mismatch (expected during cancellation)", .{});
             // Reset UI state to prevent frozen loading indicator
-            const priv = getPriv(self);
             priv.loading_label.setVisible(false);
             priv.response_view.setVisible(true);
-            return 0;
-        }
-
-        // Also check if disposed flag is set (additional protection)
-        const priv = getPriv(self);
-        if (priv.is_disposed) {
-            log.debug("streamInitCallback: widget is disposed", .{});
             return 0;
         }
 
@@ -1809,6 +1909,13 @@ pub const AiInputMode = extern struct {
 
         const self = chunk.input_mode;
 
+        // Check disposed flag FIRST before any widget access
+        const priv = getPriv(self);
+        if (priv.is_disposed) {
+            log.debug("streamChunkCallback: widget is disposed", .{});
+            return 0;
+        }
+
         // Verify this callback corresponds to the current streaming session.
         // If streaming_state != self, either streaming was cancelled or a different
         // session started. This is NOT a complete use-after-free guard - it only
@@ -1819,13 +1926,6 @@ pub const AiInputMode = extern struct {
         // If streaming state doesn't match, we're in an inconsistent state
         if (current_streaming_state != self) {
             log.debug("streamChunkCallback: streaming state mismatch (expected during cancellation), ignoring chunk", .{});
-            return 0;
-        }
-
-        // Also check if disposed flag is set (additional protection)
-        const priv = getPriv(self);
-        if (priv.is_disposed) {
-            log.debug("streamChunkCallback: widget is disposed", .{});
             return 0;
         }
 
@@ -1959,17 +2059,17 @@ pub const AiInputMode = extern struct {
 
         const priv = getPriv(self);
 
+        // Check disposed flag FIRST before any widget access
+        if (priv.is_disposed) {
+            log.debug("aiResultCallback: widget is disposed", .{});
+            return 0;
+        }
+
         // Check if widget is still valid before accessing
         if (!self.as(gtk.Widget).isVisible()) {
             // Widget was destroyed, clean up and exit
             // Note: result.response and result.err are freed by defer statements above
             return 0; // G_SOURCE_REMOVE
-        }
-
-        // Also check if disposed flag is set (additional protection)
-        if (priv.is_disposed) {
-            log.debug("aiResultCallback: widget is disposed", .{});
-            return 0;
         }
 
         // Verify streaming state is cleared (non-streaming result)

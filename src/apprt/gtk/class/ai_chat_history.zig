@@ -161,7 +161,9 @@ pub const ChatHistorySidebar = extern struct {
         const priv = getPriv(self);
         const alloc = Application.default().allocator();
 
-        // Clean up all ChatEntry items in the store to prevent memory leaks
+        // Clean up all ChatEntry items in the store to prevent memory leaks.
+        // We must: (1) deinit internal allocations, (2) clear store to release refs.
+        // This prevents double-free when GObject finalizes the store.
         if (priv.history_store) |store| {
             const n = store.getNItems();
             var i: u32 = 0;
@@ -171,6 +173,8 @@ pub const ChatHistorySidebar = extern struct {
                     entry.deinit(alloc);
                 }
             }
+            // Clear store to release references before parent dispose
+            store.removeAll();
         }
 
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
