@@ -208,6 +208,21 @@ pub const CommandPalette = extern struct {
     }
 
     fn dispose(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up all CommandItem items in the store to prevent memory leaks
+        if (priv.command_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const cmd_item: *CommandItem = @ptrCast(@alignCast(item));
+                    cmd_item.deinit(alloc);
+                }
+            }
+        }
+
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
     }
 

@@ -190,6 +190,21 @@ pub const KeyboardShortcutsDialog = extern struct {
     }
 
     fn dispose(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up all ShortcutItem items in the store to prevent memory leaks
+        if (priv.shortcuts_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const shortcut_item: *ShortcutItem = @ptrCast(@alignCast(item));
+                    shortcut_item.deinit(alloc);
+                }
+            }
+        }
+
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
     }
 
