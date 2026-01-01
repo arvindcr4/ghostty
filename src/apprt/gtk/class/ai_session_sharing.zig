@@ -42,10 +42,10 @@ pub const SessionSharingDialog = extern struct {
 
     pub const MemberItem = extern struct {
         parent_instance: gobject.Object,
-        name: []const u8,
-        email: []const u8,
-        role: []const u8,
-        cursor_position: ?[]const u8 = null,
+        name: [:0]const u8,
+        email: [:0]const u8,
+        role: [:0]const u8,
+        cursor_position: ?[:0]const u8 = null,
 
         pub const Parent = gobject.Object;
         pub const getGObjectType = gobject.ext.defineClass(MemberItem, .{
@@ -91,11 +91,11 @@ pub const SessionSharingDialog = extern struct {
 
         pub fn new(alloc: Allocator, name: []const u8, email: []const u8, role: []const u8) !*MemberItem {
             const self = gobject.ext.newInstance(MemberItem, .{});
-            self.name = try alloc.dupe(u8, name);
+            self.name = try alloc.dupeZ(u8, name);
             errdefer alloc.free(self.name);
-            self.email = try alloc.dupe(u8, email);
+            self.email = try alloc.dupeZ(u8, email);
             errdefer alloc.free(self.email);
-            self.role = try alloc.dupe(u8, role);
+            self.role = try alloc.dupeZ(u8, role);
             errdefer alloc.free(self.role);
             return self;
         }
@@ -113,33 +113,32 @@ pub const SessionSharingDialog = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &SessionSharingDialog.disposeMethod);
+            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
         }
-    };
 
-    fn disposeMethod(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        const alloc = Application.default().allocator();
+        fn dispose(self: *Self) callconv(.c) void {
+            const priv = getPriv(self);
+            const alloc = Application.default().allocator();
 
-        // Clean up all member items
-        if (priv.members_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const member_item: *MemberItem = @ptrCast(@alignCast(item));
-                    member_item.deinit(alloc);
+            // Clean up all member items
+            if (priv.members_store) |store| {
+                const n = store.getNItems();
+                var i: u32 = 0;
+                while (i < n) : (i += 1) {
+                    if (store.getItem(i)) |item| {
+                        const member_item: *MemberItem = @ptrCast(@alignCast(item));
+                        member_item.deinit(alloc);
+                    }
                 }
             }
-        }
 
-        // Clean up collaboration manager
-        if (priv.collaboration_manager) |*manager| {
-            manager.deinit();
-        }
+            // Clean up collaboration manager
+            if (priv.collaboration_manager) |*manager| {
+                manager.deinit();
+            }
 
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
-    }
+            gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+        }
 
         pub const as = C.Class.as;
     };

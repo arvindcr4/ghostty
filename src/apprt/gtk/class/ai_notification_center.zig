@@ -126,28 +126,27 @@ pub const NotificationCenter = extern struct {
         var parent: *Parent.Class = undefined;
 
         fn init(class: *Class) callconv(.c) void {
-            gobject.Object.virtual_methods.dispose.implement(class, &NotificationCenter.disposeMethod);
+            gobject.Object.virtual_methods.dispose.implement(class, &dispose);
         }
-    };
 
-    fn disposeMethod(self: *Self) callconv(.c) void {
-        const priv = getPriv(self);
-        const alloc = Application.default().allocator();
+        fn dispose(self: *Self) callconv(.c) void {
+            const priv = getPriv(self);
+            const alloc = Application.default().allocator();
 
-        // Clean up all notification items
-        if (priv.notifications_store) |store| {
-            const n = store.getNItems();
-            var i: u32 = 0;
-            while (i < n) : (i += 1) {
-                if (store.getItem(i)) |item| {
-                    const notif_item: *NotificationItem = @ptrCast(@alignCast(item));
-                    notif_item.deinit(alloc);
+            // Clean up all notification items
+            if (priv.notifications_store) |store| {
+                const n = store.getNItems();
+                var i: u32 = 0;
+                while (i < n) : (i += 1) {
+                    if (store.getItem(i)) |item| {
+                        const notif_item: *NotificationItem = @ptrCast(@alignCast(item));
+                        notif_item.deinit(alloc);
+                    }
                 }
             }
-        }
 
-        gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
-    }
+            gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
+        }
 
         pub const as = C.Class.as;
     };

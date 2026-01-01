@@ -42,10 +42,10 @@ pub const ThemeCustomizationDialog = extern struct {
 
     pub const ThemeItem = extern struct {
         parent_instance: gobject.Object,
-        name: []const u8,
-        description: []const u8,
-        colors: []const u8, // JSON string of color scheme
-        preview_image: ?[]const u8 = null,
+        name: [:0]const u8,
+        description: [:0]const u8,
+        colors: [:0]const u8, // JSON string of color scheme
+        preview_image: ?[:0]const u8 = null,
 
         pub const Parent = gobject.Object;
         pub const getGObjectType = gobject.ext.defineClass(ThemeItem, .{
@@ -59,8 +59,8 @@ pub const ThemeCustomizationDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
-                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+                gobject.Object.virtual_methods.dispose.implement(class, &ThemeItem.dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &ThemeItem.finalize);
             }
 
             fn dispose(self: *ThemeItem) callconv(.c) void {

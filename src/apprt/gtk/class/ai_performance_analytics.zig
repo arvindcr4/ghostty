@@ -58,8 +58,8 @@ pub const PerformanceAnalyticsDialog = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                gobject.Object.virtual_methods.dispose.implement(class, &dispose);
-                gobject.Object.virtual_methods.finalize.implement(class, &finalize);
+                gobject.Object.virtual_methods.dispose.implement(class, &CommandStatsItem.dispose);
+                gobject.Object.virtual_methods.finalize.implement(class, &CommandStatsItem.finalize);
             }
 
             fn dispose(self: *CommandStatsItem) callconv(.c) void {
