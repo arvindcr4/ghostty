@@ -66,14 +66,15 @@ class VoiceInputManager: ObservableObject {
     /// Clean up resources when deallocated
     /// Critical for preventing resource leaks with AVAudioEngine
     deinit {
-        debounceTask?.cancel()
-        recognitionTask?.cancel()
+        let debounce = UncheckedSendable(value: debounceTask)
+        let speechTask = UncheckedSendable(value: recognitionTask)
+        let timer = UncheckedSendable(value: silenceTimer)
+        let engine = UncheckedSendable(value: audioEngine)
+        let request = UncheckedSendable(value: recognitionRequest)
 
-        let timer = UncheckedSendable(silenceTimer)
-        let engine = UncheckedSendable(audioEngine)
-        let request = UncheckedSendable(recognitionRequest)
-
-        let cleanup = {
+        let cleanup: @Sendable () -> Void = {
+            debounce.value?.cancel()
+            speechTask.value?.cancel()
             timer.value?.invalidate()
             request.value?.endAudio()
 
