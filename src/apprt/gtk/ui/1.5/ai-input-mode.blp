@@ -99,6 +99,36 @@ Adw.Dialog dialog {
                 attribute icon: "preferences-desktop-keyboard-symbolic";
                 action: "ai.show-shortcuts";
               }
+              item {
+                attribute name: "export-import";
+                attribute label: _("Export/Import Data");
+                attribute icon: "document-save-symbolic";
+                action: "ai.show-export-import";
+              }
+              item {
+                attribute name: "notifications";
+                attribute label: _("Notifications");
+                attribute icon: "notification-symbolic";
+                action: "ai.show-notifications";
+              }
+              item {
+                attribute name: "theme";
+                attribute label: _("Theme Customization");
+                attribute icon: "preferences-color-symbolic";
+                action: "ai.show-theme-customization";
+              }
+              item {
+                attribute name: "session";
+                attribute label: _("Session Sharing");
+                attribute icon: "emblem-shared-symbolic";
+                action: "ai.show-session-sharing";
+              }
+              item {
+                attribute name: "analysis";
+                attribute label: _("Command Analysis");
+                attribute icon: "system-search-symbolic";
+                action: "ai.show-command-analysis";
+              }
             }
           }
         }

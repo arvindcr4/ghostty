@@ -38,6 +38,9 @@ const InlineSuggestions = @import("ai_inline_suggestions.zig").InlineSuggestions
 const ThemeCustomizationDialog = @import("ai_theme_customization.zig").ThemeCustomizationDialog;
 const SessionSharingDialog = @import("ai_session_sharing.zig").SessionSharingDialog;
 const CommandAnalysisDialog = @import("ai_command_analysis.zig").CommandAnalysisDialog;
+const TabCompletionOverlay = @import("ai_tab_completion.zig").TabCompletionOverlay;
+const InlineExplanationTooltip = @import("ai_inline_explanations.zig").InlineExplanationTooltip;
+const PerformanceAnalyticsDialog = @import("ai_performance_analytics.zig").PerformanceAnalyticsDialog;
 
 /// AI Input Mode Widget
 ///
@@ -326,6 +329,9 @@ pub const AiInputMode = extern struct {
         theme_customization_dialog: ?*ThemeCustomizationDialog = null,
         session_sharing_dialog: ?*SessionSharingDialog = null,
         command_analysis_dialog: ?*CommandAnalysisDialog = null,
+        tab_completion_overlay: ?*TabCompletionOverlay = null,
+        inline_explanation_tooltip: ?*InlineExplanationTooltip = null,
+        performance_analytics_dialog: ?*PerformanceAnalyticsDialog = null,
 
         /// Flag to track if object has been disposed (prevents use-after-free)
         is_disposed: bool = false,
@@ -2372,6 +2378,11 @@ pub const AiInputMode = extern struct {
         const analysis_action = gio.SimpleAction.new("show-command-analysis", null);
         _ = gio.SimpleAction.signals.activate.connect(analysis_action, *Self, showCommandAnalysis, self, .{});
         action_group.addAction(analysis_action);
+
+        // Performance analytics action
+        const performance_action = gio.SimpleAction.new("show-performance-analytics", null);
+        _ = gio.SimpleAction.signals.activate.connect(performance_action, *Self, showPerformanceAnalytics, self, .{});
+        action_group.addAction(performance_action);
 
         // Insert action group
         self.as(gtk.Widget).insertActionGroup("ai", action_group.as(gio.ActionGroup));
