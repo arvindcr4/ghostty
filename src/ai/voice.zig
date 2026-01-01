@@ -79,8 +79,6 @@ pub const VoiceConfig = struct {
     sample_rate: u32 = 16000,
     /// Number of audio channels
     channels: u8 = 1,
-    /// HTTP request timeout in milliseconds (for external backend)
-    http_timeout_ms: u32 = 30000,
 };
 
 /// Audio sample buffer
@@ -882,10 +880,6 @@ pub const VoiceInputManager = struct {
         try body.appendSlice(wav_data);
         try body.appendSlice("\r\n--" ++ boundary ++ "--\r\n");
 
-        // Note: HTTP timeout is configured via http_timeout_ms in VoiceConfig
-        // The timeout is applied to the connection and read operations
-        _ = self.config.http_timeout_ms; // Used for documentation, actual timeout depends on OS defaults
-
         var req = client.open(.POST, uri, .{
             .extra_headers = &[_]std.http.Header{
                 .{ .name = "Content-Type", .value = "multipart/form-data; boundary=" ++ boundary },
@@ -960,7 +954,17 @@ pub const VoiceInputManager = struct {
         var response_body = ArrayList(u8).init(self.alloc);
         defer response_body.deinit();
         var reader = req.reader();
-        reader.readAllArrayList(&response_body, 64 * 1024) catch {};
+        reader.readAllArrayList(&response_body, 64 * 1024) catch |err| {
+            log.err("Failed to read HTTP response body: {}", .{err});
+            return VoiceInputResult{
+                .text = try self.alloc.dupe(u8, "[Failed to read response from service]"),
+                .confidence = 0.0,
+                .language = try self.alloc.dupe(u8, self.config.language),
+                .duration_ms = duration,
+                .is_partial = false,
+                .alternatives = ArrayList(VoiceInputResult.Alternative).init(self.alloc),
+            };
+        };
 
         // Parse JSON response for "text" field
         const text = self.parseJsonText(response_body.items) orelse {
@@ -986,22 +990,17 @@ pub const VoiceInputManager = struct {
 
     /// Parse JSON to extract "text" field value
     fn parseJsonText(self: *VoiceInputManager, json: []const u8) ?[]const u8 {
-        const text_key = "\"text\":";
-        const start = std.mem.indexOf(u8, json, text_key) orelse return null;
-        var pos = start + text_key.len;
+        const Response = struct {
+            text: ?[]const u8 = null,
+        };
 
-        // Skip whitespace
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == '\t' or json[pos] == '\n')) : (pos += 1) {}
-        if (pos >= json.len or json[pos] != '"') return null;
-        pos += 1;
+        var parsed = std.json.parseFromSlice(Response, self.alloc, json, .{
+            .ignore_unknown_fields = true,
+        }) catch return null;
+        defer parsed.deinit();
 
-        const text_start = pos;
-        while (pos < json.len and json[pos] != '"') : (pos += 1) {
-            if (json[pos] == '\\' and pos + 1 < json.len) pos += 1; // Skip escaped chars
-        }
-        if (pos >= json.len) return null;
-
-        return self.alloc.dupe(u8, json[text_start..pos]) catch null;
+        const text = parsed.value.text orelse return null;
+        return self.alloc.dupe(u8, text) catch null;
     }
 
     /// Encode audio samples to WAV format
@@ -1044,37 +1043,18 @@ pub const VoiceInputManager = struct {
         return wav;
     }
 
-    /// Process using mock backend (for testing)
+    /// Process using mock backend - returns error since no transcription is available
+    /// This is called when no real speech recognition backend is configured.
     fn processMock(self: *VoiceInputManager, duration: i64) !VoiceInputResult {
-        // Generate mock result based on duration
-        const mock_texts = [_][]const u8{
-            "list all files in the current directory",
-            "show git status",
-            "run the build script",
-            "open the configuration file",
-            "search for errors in the log",
-        };
-
-        // Use duration to select a mock response deterministically
-        const idx = @as(usize, @intCast(@mod(duration, mock_texts.len)));
-
-        var alternatives = ArrayList(VoiceInputResult.Alternative).init(self.alloc);
-
-        // Add some alternatives
-        if (idx + 1 < mock_texts.len) {
-            try alternatives.append(.{
-                .text = try self.alloc.dupe(u8, mock_texts[idx + 1]),
-                .confidence = 0.75,
-            });
-        }
+        log.warn("Voice transcription not available - no whisper CLI found and no external service configured", .{});
 
         return VoiceInputResult{
-            .text = try self.alloc.dupe(u8, mock_texts[idx]),
-            .confidence = 0.95,
+            .text = try self.alloc.dupe(u8, "[Voice transcription not available. Install whisper CLI or configure an external speech recognition service.]"),
+            .confidence = 0.0,
             .language = try self.alloc.dupe(u8, self.config.language),
             .duration_ms = duration,
             .is_partial = false,
-            .alternatives = alternatives,
+            .alternatives = ArrayList(VoiceInputResult.Alternative).init(self.alloc),
         };
     }
 

@@ -119,8 +119,16 @@ pub const ErrorExplanation = extern struct {
         }
 
         const toast_text = toast_msg.toOwnedSliceSentinel(0) catch {
-            // If allocation fails, use original explanation
-            const toast = adw.Toast.new(explanation);
+            // If allocation fails, fall back to a z-string copy (or a fixed message).
+            const explanation_z = alloc.dupeZ(u8, explanation) catch {
+                const toast = adw.Toast.new("Out of memory");
+                toast.setTimeout(10);
+                self.addToast(toast);
+                return;
+            };
+            defer alloc.free(explanation_z);
+
+            const toast = adw.Toast.new(explanation_z);
             toast.setTimeout(10);
             self.addToast(toast);
             return;

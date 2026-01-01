@@ -350,6 +350,13 @@ pub const AiInputMode = extern struct {
     var streaming_state_mutex = std.Thread.Mutex{};
     var streaming_state: ?*AiInputMode = null;
 
+    /// Safely read the current streaming state with mutex protection
+    fn getStreamingState() ?*AiInputMode {
+        streaming_state_mutex.lock();
+        defer streaming_state_mutex.unlock();
+        return streaming_state;
+    }
+
     /// Built-in prompt templates
     const PromptTemplate = struct {
         name: [:0]const u8,
@@ -1489,7 +1496,8 @@ pub const AiInputMode = extern struct {
 
                 // Send error result to main thread to notify user
                 const ai_result = alloc.create(AiResult) catch {
-                    // Even cleanup failed, nothing more we can do
+                    // Even cleanup failed - release ref since callback won't run
+                    ctx.input_mode.unref();
                     return;
                 };
                 ai_result.* = .{
@@ -1504,6 +1512,8 @@ pub const AiInputMode = extern struct {
                     // Clean up the result since callback won't run
                     if (ai_result.err) |e| alloc.free(e);
                     alloc.destroy(ai_result);
+                    // Release ref since callback won't run
+                    ctx.input_mode.unref();
                 }
                 return;
             };
@@ -1607,9 +1617,12 @@ pub const AiInputMode = extern struct {
 
             // Process with streaming (this blocks until stream completes)
             assistant.processStream(ctx.prompt, ctx.context, stream_options) catch |err| {
-                // On error, send error result
+                // On error, send error result.
+                // Note: If streaming succeeded, ref was released in streamChunkCallback.
+                // If streaming failed (we're here), ref has NOT been released yet.
                 const ai_result = alloc.create(AiResult) catch {
-                    // Even cleanup failed, nothing more we can do
+                    // Even cleanup failed - release ref since callback won't run
+                    ctx.input_mode.unref();
                     return;
                 };
                 ai_result.* = .{
@@ -1624,6 +1637,8 @@ pub const AiInputMode = extern struct {
                     // Clean up the result since callback won't run
                     if (ai_result.err) |e| alloc.free(e);
                     alloc.destroy(ai_result);
+                    // Release ref since callback won't run
+                    ctx.input_mode.unref();
                 }
             };
         } else {
@@ -1631,7 +1646,8 @@ pub const AiInputMode = extern struct {
             const result = assistant.process(ctx.prompt, ctx.context);
 
             const ai_result = alloc.create(AiResult) catch {
-                // Even cleanup failed, nothing more we can do
+                // Even cleanup failed - release ref since callback won't run
+                ctx.input_mode.unref();
                 return;
             };
             ai_result.* = .{
@@ -1655,6 +1671,8 @@ pub const AiInputMode = extern struct {
                 if (ai_result.response) |r| alloc.free(r);
                 if (ai_result.err) |e| alloc.free(e);
                 alloc.destroy(ai_result);
+                // Release ref since callback won't run
+                ctx.input_mode.unref();
             }
         }
     }
@@ -1672,12 +1690,21 @@ pub const AiInputMode = extern struct {
         // session started. This is NOT a complete use-after-free guard - it only
         // detects stale callbacks from cancelled sessions. The actual lifetime
         // guarantee comes from the ref() call in send_clicked before spawning the thread.
-        streaming_state_mutex.lock();
-        const current_streaming_state = streaming_state;
-        streaming_state_mutex.unlock();
+        const current_streaming_state = getStreamingState();
 
         if (current_streaming_state != self) {
             log.debug("streamInitCallback: streaming state mismatch (expected during cancellation)", .{});
+            // Reset UI state to prevent frozen loading indicator
+            const priv = getPriv(self);
+            priv.loading_label.setVisible(false);
+            priv.response_view.setVisible(true);
+            return 0;
+        }
+
+        // Also check if disposed flag is set (additional protection)
+        const priv = getPriv(self);
+        if (priv.is_disposed) {
+            log.debug("streamInitCallback: widget is disposed", .{});
             return 0;
         }
 
@@ -1717,13 +1744,18 @@ pub const AiInputMode = extern struct {
         // session started. This is NOT a complete use-after-free guard - it only
         // detects stale callbacks from cancelled sessions. The actual lifetime
         // guarantee comes from the ref() call in send_clicked before spawning the thread.
-        streaming_state_mutex.lock();
-        const current_streaming_state = streaming_state;
-        streaming_state_mutex.unlock();
+        const current_streaming_state = getStreamingState();
 
         // If streaming state doesn't match, we're in an inconsistent state
         if (current_streaming_state != self) {
             log.debug("streamChunkCallback: streaming state mismatch (expected during cancellation), ignoring chunk", .{});
+            return 0;
+        }
+
+        // Also check if disposed flag is set (additional protection)
+        const priv = getPriv(self);
+        if (priv.is_disposed) {
+            log.debug("streamChunkCallback: widget is disposed", .{});
             return 0;
         }
 
@@ -1781,22 +1813,20 @@ pub const AiInputMode = extern struct {
                     const item_priv = gobject.ext.getPriv(item, &ResponseItem.ResponseItemPrivate.offset);
 
                     // Convert accumulated content to sentinel-terminated string for command extraction
-                    const content_z_for_command = alloc.dupeZ(u8, buffer.items) catch |err| {
-                        log.err("Failed to allocate string for command extraction: {}", .{err});
-                        // Continue without command extraction
-                    };
-                    defer if (content_z_for_command) |cz| alloc.free(cz);
+                    if (alloc.dupeZ(u8, buffer.items)) |cz| {
+                        defer alloc.free(cz);
 
-                    if (content_z_for_command) |cz| {
-                        const command = extractCommandFromMarkdown(alloc, cz) catch |err| {
+                        if (extractCommandFromMarkdown(alloc, cz)) |command| {
+                            if (item_priv.command.len == 0 and command.len > 0) {
+                                item_priv.command = command;
+                            } else if (command.len > 0) {
+                                alloc.free(command);
+                            }
+                        } else |err| {
                             log.err("Failed to extract command: {}", .{err});
-                            "";
-                        };
-                        if (item_priv.command.len == 0 and command.len > 0) {
-                            item_priv.command = command;
-                        } else if (command.len > 0) {
-                            alloc.free(command);
                         }
+                    } else |err| {
+                        log.err("Failed to allocate string for command extraction: {}", .{err});
                     }
                     // Clear the reference but don't free the item (store owns it)
                     priv.streaming_response_item = null;
@@ -1829,6 +1859,11 @@ pub const AiInputMode = extern struct {
                 defer alloc.free(content_z_for_auto_execute);
 
                 self.maybeAutoExecuteFromResponse(content_z_for_auto_execute);
+
+                // Release the ref acquired in send_clicked.
+                // In the streaming path, this is the final callback, so we release here.
+                // (In the non-streaming path, aiResultCallback releases it.)
+                self.unref();
             }
         }
 
@@ -1854,10 +1889,14 @@ pub const AiInputMode = extern struct {
             return 0; // G_SOURCE_REMOVE
         }
 
+        // Also check if disposed flag is set (additional protection)
+        if (priv.is_disposed) {
+            log.debug("aiResultCallback: widget is disposed", .{});
+            return 0;
+        }
+
         // Verify streaming state is cleared (non-streaming result)
-        streaming_state_mutex.lock();
-        const current_streaming_state = streaming_state;
-        streaming_state_mutex.unlock();
+        const current_streaming_state = getStreamingState();
 
         // For non-streaming results, streaming_state should be null
         if (current_streaming_state != null) {
@@ -1892,9 +1931,8 @@ pub const AiInputMode = extern struct {
         self.notify(properties.regenerate_sensitive.name);
 
         // If the user cancelled, ignore late-arriving results.
+        // Note: defer statements above handle freeing result.response and result.err
         if (priv.request_cancelled) {
-            if (result.response) |resp| alloc.free(resp);
-            if (result.err) |err| alloc.free(err);
             return 0; // G_SOURCE_REMOVE
         }
 
@@ -1903,12 +1941,12 @@ pub const AiInputMode = extern struct {
                 self.maybeAutoExecuteFromResponse(resp);
             } else |add_err| {
                 log.err("Failed to add response: {}", .{add_err});
-                alloc.free(resp);
+                // Note: defer handles freeing resp
             }
         } else if (result.err) |err_msg| {
             _ = self.addResponse(err_msg) catch |add_err| {
                 log.err("Failed to add error response: {}", .{add_err});
-                alloc.free(err_msg);
+                // Note: defer handles freeing err_msg
             };
         }
 

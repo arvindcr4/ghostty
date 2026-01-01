@@ -158,6 +158,21 @@ pub const ChatHistorySidebar = extern struct {
     }
 
     fn dispose(self: *Self) callconv(.c) void {
+        const priv = getPriv(self);
+        const alloc = Application.default().allocator();
+
+        // Clean up all ChatEntry items in the store to prevent memory leaks
+        if (priv.history_store) |store| {
+            const n = store.getNItems();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (store.getItem(i)) |item| {
+                    const entry: *ChatEntry = @ptrCast(@alignCast(item));
+                    entry.deinit(alloc);
+                }
+            }
+        }
+
         gobject.Object.virtual_methods.dispose.call(Class.parent, self.as(Parent));
     }
 

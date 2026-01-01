@@ -28,3 +28,4 @@ macos/macos/GhosttyKit.xcframework/
 *.o
 *.a
 zig_*_test
+/helpgen
