@@ -948,7 +948,7 @@ pub const AiInputMode = extern struct {
     pub fn showCommandPalette(self: *Self) void {
         const priv = getPriv(self);
         const win = priv.window orelse return;
-        
+
         const palette = CommandPalette.new();
         palette.show(win);
     }
@@ -1373,7 +1373,7 @@ pub const AiInputMode = extern struct {
         // Show loading state
         priv.response_view.setVisible(false);
         priv.loading_label.setVisible(true);
-        
+
         // Update progress bar with error handling
         if (priv.progress_bar) |pb| {
             // Check if widget is still valid
@@ -1403,10 +1403,14 @@ pub const AiInputMode = extern struct {
 
         // Prepare thread context
         const prompt_dupe = alloc.dupe(u8, prompt_final) catch return;
-        const context_dupe = if (context.len > 0) alloc.dupe(u8, context) catch null else null;
+        errdefer alloc.free(prompt_dupe);
+
+        const context_dupe = if (context.len > 0) alloc.dupe(u8, context) catch null;
+        errdefer if (context_dupe) |c| alloc.free(c);
 
         // Ref config to keep it alive for the thread
         _ = config.ref();
+        errdefer config.unref();
 
         // Enable streaming for all providers (config option can disable it)
         const enable_streaming = config.get().@"ai-enabled";
@@ -1422,9 +1426,13 @@ pub const AiInputMode = extern struct {
 
         // Ref the widget to keep it alive
         _ = self.ref();
+        errdefer self.unref();
 
         const thread = std.Thread.spawn(.{}, aiThreadMain, .{ctx}) catch |err| {
             log.err("Failed to spawn AI request thread: {}", .{err});
+
+            // Manual cleanup since errdefer doesn't fire on normal return
+            // (errdefer only fires on error return paths)
             alloc.free(prompt_dupe);
             if (context_dupe) |c| alloc.free(c);
             config.unref();
@@ -1532,20 +1540,20 @@ pub const AiInputMode = extern struct {
                             },
                             .done = chunk.done,
                         };
-                        
+
                         // Update progress bar if available
                         if (mode) |m| {
                             const priv_cb = getPriv(m);
                             if (priv_cb.progress_bar) |pb| {
                                 // Check if widget is still valid before accessing
                                 if (!m.as(gtk.Widget).isVisible()) return;
-                                
+
                                 if (!chunk.done) {
                                     pb.setVisible(@intFromBool(true));
                                     // Estimate progress based on content length (rough estimate)
                                     const progress = @min(0.95, @as(f32, @floatFromInt(chunk.content.len)) / 10000.0);
                                     pb.setFraction(progress);
-                                    
+
                                     // Update progress text
                                     const progress_text = std.fmt.allocPrintZ(alloc_cb, "Processing... {d}%", .{@intFromFloat(progress * 100.0)}) catch {
                                         pb.setText("Processing...");
@@ -1556,7 +1564,7 @@ pub const AiInputMode = extern struct {
                                 } else {
                                     pb.setFraction(1.0);
                                     pb.setText("Complete");
-                                    
+
                                     // Hide after a short delay with error handling
                                     const pb_ref = pb.ref();
                                     if (glib.timeoutAdd(500, struct {
@@ -1658,6 +1666,24 @@ pub const AiInputMode = extern struct {
         defer alloc.destroy(chunk);
 
         const self = chunk.input_mode;
+
+        // Verify this callback corresponds to the current streaming session.
+        // If streaming_state != self, either streaming was cancelled or a different
+        // session started. This is NOT a complete use-after-free guard - it only
+        // detects stale callbacks from cancelled sessions. The actual lifetime
+        // guarantee comes from the ref() call in send_clicked before spawning the thread.
+        streaming_state_mutex.lock();
+        const current_streaming_state = streaming_state;
+        streaming_state_mutex.unlock();
+
+        if (current_streaming_state != self) {
+            log.debug("streamInitCallback: streaming state mismatch (expected during cancellation)", .{});
+            return 0;
+        }
+
+        // Now safe to check widget visibility since streaming state is valid
+        if (!self.as(gtk.Widget).isVisible()) return 0;
+
         const priv = getPriv(self);
 
         // Initialize streaming response buffer
@@ -1686,8 +1712,22 @@ pub const AiInputMode = extern struct {
 
         const self = chunk.input_mode;
 
-        // Check if widget is still valid before accessing (use-after-free prevention)
-        // Widget may have been destroyed while callback was pending
+        // Verify this callback corresponds to the current streaming session.
+        // If streaming_state != self, either streaming was cancelled or a different
+        // session started. This is NOT a complete use-after-free guard - it only
+        // detects stale callbacks from cancelled sessions. The actual lifetime
+        // guarantee comes from the ref() call in send_clicked before spawning the thread.
+        streaming_state_mutex.lock();
+        const current_streaming_state = streaming_state;
+        streaming_state_mutex.unlock();
+
+        // If streaming state doesn't match, we're in an inconsistent state
+        if (current_streaming_state != self) {
+            log.debug("streamChunkCallback: streaming state mismatch (expected during cancellation), ignoring chunk", .{});
+            return 0;
+        }
+
+        // Now safe to check widget visibility since streaming state is valid
         if (!self.as(gtk.Widget).isVisible()) return 0;
 
         const priv = getPriv(self);
@@ -1806,15 +1846,30 @@ pub const AiInputMode = extern struct {
         defer self.unref();
 
         const priv = getPriv(self);
-        
+
         // Check if widget is still valid before accessing
         if (!self.as(gtk.Widget).isVisible()) {
             // Widget was destroyed, clean up and exit
-            if (result.response) |resp| alloc.free(resp);
-            if (result.err) |err| alloc.free(err);
+            // Note: result.response and result.err are freed by defer statements above
             return 0; // G_SOURCE_REMOVE
         }
-        
+
+        // Verify streaming state is cleared (non-streaming result)
+        streaming_state_mutex.lock();
+        const current_streaming_state = streaming_state;
+        streaming_state_mutex.unlock();
+
+        // For non-streaming results, streaming_state should be null
+        if (current_streaming_state != null) {
+            log.warn("aiResultCallback: unexpected streaming state for non-streaming result", .{});
+            // Clear the streaming state if it's us
+            if (current_streaming_state == self) {
+                streaming_state_mutex.lock();
+                streaming_state = null;
+                streaming_state_mutex.unlock();
+            }
+        }
+
         priv.loading_label.setVisible(false);
         priv.response_view.setVisible(true);
 
@@ -1938,7 +1993,7 @@ pub const AiInputMode = extern struct {
         const priv = getPriv(self);
         const visible = priv.api_key_entry.getVisibility();
         priv.api_key_entry.setVisibility(@intFromBool(!visible));
-        
+
         const icon_name = if (visible) "eye-not-looking-symbolic" else "eye-open-negative-filled-symbolic";
         priv.api_key_toggle.setIconName(icon_name);
     }
@@ -2229,7 +2284,7 @@ pub const AiInputMode = extern struct {
         dialog.setDefaultResponse("ok");
         dialog.setCloseResponse("ok");
         dialog.setModal(@intFromBool(true));
-        
+
         const win = priv.window orelse return;
         dialog.setTransientFor(win.as(gtk.Window));
         dialog.present();
@@ -2247,7 +2302,7 @@ pub const AiInputMode = extern struct {
         dialog.setDefaultResponse("ok");
         dialog.setCloseResponse("ok");
         dialog.setModal(@intFromBool(true));
-        
+
         const win = priv.window orelse return;
         dialog.setTransientFor(win.as(gtk.Window));
         dialog.present();
@@ -2265,7 +2320,7 @@ pub const AiInputMode = extern struct {
         dialog.setDefaultResponse("ok");
         dialog.setCloseResponse("ok");
         dialog.setModal(@intFromBool(true));
-        
+
         const win = priv.window orelse return;
         dialog.setTransientFor(win.as(gtk.Window));
         dialog.present();
@@ -2381,18 +2436,18 @@ pub const AiInputMode = extern struct {
             priv.regenerate_sensitive = true;
             self.notify(properties.send_sensitive.name);
             self.notify(properties.regenerate_sensitive.name);
-            
+
             // Hide progress bar on error
             if (priv.progress_bar) |pb| {
                 pb.setVisible(false);
                 pb.setFraction(0.0);
                 pb.setText("");
             }
-            
+
             _ = self.addResponse("Error: Failed to prepare regeneration request. Please try again.") catch {};
             return;
         };
-        
+
         const context_dupe: ?[]const u8 = blk: {
             if (priv.last_context) |ctx| {
                 if (ctx.len > 0) {
@@ -2409,7 +2464,7 @@ pub const AiInputMode = extern struct {
             log.err("Regenerate clicked but config is null", .{});
             alloc.free(prompt_dupe);
             if (context_dupe) |c| alloc.free(c);
-            
+
             // Reset UI state
             priv.loading_label.setVisible(false);
             priv.response_view.setVisible(true);
@@ -2417,14 +2472,14 @@ pub const AiInputMode = extern struct {
             priv.regenerate_sensitive = true;
             self.notify(properties.send_sensitive.name);
             self.notify(properties.regenerate_sensitive.name);
-            
+
             // Hide progress bar on error
             if (priv.progress_bar) |pb| {
                 pb.setVisible(false);
                 pb.setFraction(0.0);
                 pb.setText("");
             }
-            
+
             _ = self.addResponse("Error: Configuration not available. Please check your settings.") catch {};
             return;
         };
