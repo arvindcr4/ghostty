@@ -766,6 +766,8 @@ pub const ThemeSuggestionManager = struct {
         for (scored_themes.items[0..count]) |item| {
             var cloned = try self.cloneTheme(item.theme.*);
             cloned.confidence = item.score;
+            // Free the old reason before replacing with context-specific one
+            self.alloc.free(cloned.reason);
             cloned.reason = try self.generateReason(item.theme.*, context);
             try suggestions.append(cloned);
         }

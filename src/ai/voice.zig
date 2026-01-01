@@ -441,7 +441,12 @@ pub const VoiceInputManager = struct {
         child.spawn() catch return null;
         const term = child.wait() catch return null;
 
-        if (term.Exited != 0) {
+        // Check if process exited successfully (must pattern match the union)
+        const exit_code = switch (term) {
+            .Exited => |code| code,
+            else => return null, // Treat signal/stop as failure
+        };
+        if (exit_code != 0) {
             return null;
         }
 
@@ -664,7 +669,11 @@ pub const VoiceInputManager = struct {
                 };
             };
 
-            if (term.Exited != 0) {
+            const exit_code = switch (term) {
+                .Exited => |code| code,
+                else => 1, // Treat signal/stop as failure
+            };
+            if (exit_code != 0) {
                 return VoiceInputResult{
                     .text = try self.alloc.dupe(u8, "[Whisper.cpp exited with error]"),
                     .confidence = 0.0,
@@ -711,7 +720,11 @@ pub const VoiceInputManager = struct {
                 };
             };
 
-            if (term.Exited != 0) {
+            const exit_code = switch (term) {
+                .Exited => |code| code,
+                else => 1, // Treat signal/stop as failure
+            };
+            if (exit_code != 0) {
                 return VoiceInputResult{
                     .text = try self.alloc.dupe(u8, "[Whisper exited with error]"),
                     .confidence = 0.0,
