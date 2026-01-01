@@ -56,16 +56,13 @@ pub const ChatSidebar = extern struct {
             var parent: *gobject.Object.Class = undefined;
 
             fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+                gobject.Object.virtual_methods.dispose.implement(class, &ChatMessage.dispose);
             }
-        };
 
-        pub const ItemClass = extern struct {
-            parent_class: gobject.Object.Class,
-            var parent: *gobject.Object.Class = undefined;
-
-            fn init(class: *ItemClass) callconv(.c) void {
-                _ = class;
+            fn dispose(self: *ChatMessage) callconv(.c) void {
+                const alloc = Application.default().allocator();
+                alloc.free(self.content);
+                gobject.Object.virtual_methods.dispose.call(ItemClass.parent, self);
             }
         };
 

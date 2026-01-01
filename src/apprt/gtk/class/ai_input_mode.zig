@@ -41,6 +41,16 @@ const CommandAnalysisDialog = @import("ai_command_analysis.zig").CommandAnalysis
 const TabCompletionOverlay = @import("ai_tab_completion.zig").TabCompletionOverlay;
 const InlineExplanationTooltip = @import("ai_inline_explanations.zig").InlineExplanationTooltip;
 const PerformanceAnalyticsDialog = @import("ai_performance_analytics.zig").PerformanceAnalyticsDialog;
+const DiffViewerDialog = @import("ai_diff_viewer.zig").DiffViewerDialog;
+const ChatSidebar = @import("ai_chat_sidebar.zig").ChatSidebar;
+const HistoryTimelineDialog = @import("ai_history_timeline.zig").HistoryTimelineDialog;
+const InsightsPanel = @import("ai_insights_panel.zig").InsightsPanel;
+const CommandPreviewDialog = @import("ai_command_preview.zig").CommandPreviewDialog;
+const CommandBookmarksDialog = @import("ai_command_bookmarks.zig").CommandBookmarksDialog;
+const TemplatesLibraryDialog = @import("ai_templates_library.zig").TemplatesLibraryDialog;
+const QuickActionsPanel = @import("ai_quick_actions.zig").QuickActionsPanel;
+const OutputFormattingDialog = @import("ai_output_formatting.zig").OutputFormattingDialog;
+const AliasesManagerDialog = @import("ai_aliases_manager.zig").AliasesManagerDialog;
 
 /// AI Input Mode Widget
 ///
@@ -334,6 +344,16 @@ pub const AiInputMode = extern struct {
         tab_completion_overlay: ?*TabCompletionOverlay = null,
         inline_explanation_tooltip: ?*InlineExplanationTooltip = null,
         performance_analytics_dialog: ?*PerformanceAnalyticsDialog = null,
+        diff_viewer_dialog: ?*DiffViewerDialog = null,
+        chat_sidebar: ?*ChatSidebar = null,
+        history_timeline_dialog: ?*HistoryTimelineDialog = null,
+        insights_panel: ?*InsightsPanel = null,
+        command_preview_dialog: ?*CommandPreviewDialog = null,
+        command_bookmarks_dialog: ?*CommandBookmarksDialog = null,
+        templates_library_dialog: ?*TemplatesLibraryDialog = null,
+        quick_actions_panel: ?*QuickActionsPanel = null,
+        output_formatting_dialog: ?*OutputFormattingDialog = null,
+        aliases_manager_dialog: ?*AliasesManagerDialog = null,
 
         /// Flag to track if object has been disposed (prevents use-after-free)
         is_disposed: bool = false,
@@ -603,6 +623,54 @@ pub const AiInputMode = extern struct {
         if (priv.command_analysis_dialog) |dialog| {
             dialog.unref();
             priv.command_analysis_dialog = null;
+        }
+
+        // Clean up performance analytics dialog if created
+        if (priv.performance_analytics_dialog) |dialog| {
+            dialog.unref();
+            priv.performance_analytics_dialog = null;
+        }
+
+        // Clean up new dialogs if created
+        if (priv.diff_viewer_dialog) |dialog| {
+            dialog.unref();
+            priv.diff_viewer_dialog = null;
+        }
+        if (priv.chat_sidebar) |sidebar| {
+            sidebar.unref();
+            priv.chat_sidebar = null;
+        }
+        if (priv.history_timeline_dialog) |dialog| {
+            dialog.unref();
+            priv.history_timeline_dialog = null;
+        }
+        if (priv.insights_panel) |panel| {
+            panel.unref();
+            priv.insights_panel = null;
+        }
+        if (priv.command_preview_dialog) |dialog| {
+            dialog.unref();
+            priv.command_preview_dialog = null;
+        }
+        if (priv.command_bookmarks_dialog) |dialog| {
+            dialog.unref();
+            priv.command_bookmarks_dialog = null;
+        }
+        if (priv.templates_library_dialog) |dialog| {
+            dialog.unref();
+            priv.templates_library_dialog = null;
+        }
+        if (priv.quick_actions_panel) |panel| {
+            panel.unref();
+            priv.quick_actions_panel = null;
+        }
+        if (priv.output_formatting_dialog) |dialog| {
+            dialog.unref();
+            priv.output_formatting_dialog = null;
+        }
+        if (priv.aliases_manager_dialog) |dialog| {
+            dialog.unref();
+            priv.aliases_manager_dialog = null;
         }
 
         // Clean up tab completion overlay if created
@@ -2502,6 +2570,31 @@ pub const AiInputMode = extern struct {
         _ = gio.SimpleAction.signals.activate.connect(performance_action, *Self, showPerformanceAnalytics, self, .{});
         action_group.addAction(performance_action);
 
+        // Command bookmarks action
+        const bookmarks_action = gio.SimpleAction.new("show-command-bookmarks", null);
+        _ = gio.SimpleAction.signals.activate.connect(bookmarks_action, *Self, showCommandBookmarks, self, .{});
+        action_group.addAction(bookmarks_action);
+
+        // Templates library action
+        const templates_action = gio.SimpleAction.new("show-templates-library", null);
+        _ = gio.SimpleAction.signals.activate.connect(templates_action, *Self, showTemplatesLibrary, self, .{});
+        action_group.addAction(templates_action);
+
+        // Quick actions action
+        const quick_actions_action = gio.SimpleAction.new("show-quick-actions", null);
+        _ = gio.SimpleAction.signals.activate.connect(quick_actions_action, *Self, showQuickActions, self, .{});
+        action_group.addAction(quick_actions_action);
+
+        // Output formatting action
+        const formatting_action = gio.SimpleAction.new("show-output-formatting", null);
+        _ = gio.SimpleAction.signals.activate.connect(formatting_action, *Self, showOutputFormatting, self, .{});
+        action_group.addAction(formatting_action);
+
+        // Aliases manager action
+        const aliases_action = gio.SimpleAction.new("show-aliases-manager", null);
+        _ = gio.SimpleAction.signals.activate.connect(aliases_action, *Self, showAliasesManager, self, .{});
+        action_group.addAction(aliases_action);
+
         // Insert action group
         self.as(gtk.Widget).insertActionGroup("ai", action_group.as(gio.ActionGroup));
     }
@@ -2664,6 +2757,76 @@ pub const AiInputMode = extern struct {
         const dialog = priv.performance_analytics_dialog orelse blk: {
             const new_dialog = PerformanceAnalyticsDialog.new();
             priv.performance_analytics_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showCommandBookmarks(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.command_bookmarks_dialog orelse blk: {
+            const new_dialog = CommandBookmarksDialog.new();
+            priv.command_bookmarks_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showTemplatesLibrary(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.templates_library_dialog orelse blk: {
+            const new_dialog = TemplatesLibraryDialog.new();
+            priv.templates_library_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showQuickActions(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const panel = priv.quick_actions_panel orelse blk: {
+            const new_panel = QuickActionsPanel.new();
+            priv.quick_actions_panel = new_panel;
+            break :blk new_panel;
+        };
+        panel.show(win);
+    }
+
+    fn showOutputFormatting(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_formatting_dialog orelse blk: {
+            const new_dialog = OutputFormattingDialog.new();
+            priv.output_formatting_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showAliasesManager(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.aliases_manager_dialog orelse blk: {
+            const new_dialog = AliasesManagerDialog.new();
+            priv.aliases_manager_dialog = new_dialog;
             break :blk new_dialog;
         };
         dialog.show(win);

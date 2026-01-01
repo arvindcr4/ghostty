@@ -918,3 +918,108 @@ pub const StreamOptions = struct {
     /// Optional cancellation flag (true means cancel/stop).
     cancelled: ?*const std.atomic.Value(bool) = null,
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "findSseDelimiter with LF delimiter" {
+    const buf1 = "data: hello\n\ndata: world";
+    const result1 = findSseDelimiter(buf1);
+    try std.testing.expect(result1 != null);
+    try std.testing.expectEqual(@as(usize, 11), result1.?.index);
+    try std.testing.expectEqual(@as(usize, 2), result1.?.len);
+}
+
+test "findSseDelimiter with CRLF delimiter" {
+    const buf2 = "data: hello\r\n\r\ndata: world";
+    const result2 = findSseDelimiter(buf2);
+    try std.testing.expect(result2 != null);
+    try std.testing.expectEqual(@as(usize, 11), result2.?.index);
+    try std.testing.expectEqual(@as(usize, 4), result2.?.len);
+}
+
+test "findSseDelimiter with no delimiter" {
+    const buf3 = "data: hello\ndata: world";
+    const result3 = findSseDelimiter(buf3);
+    try std.testing.expectEqual(@as(?SseDelimiter, null), result3);
+}
+
+test "consumePrefix removes bytes from buffer" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "hello world");
+    consumePrefix(&buf, 6);
+    try std.testing.expectEqualStrings("world", buf.items);
+}
+
+test "consumePrefix handles full consumption" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "hello");
+    consumePrefix(&buf, 5);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "consumePrefix handles over-consumption" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "hello");
+    consumePrefix(&buf, 10);
+    try std.testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "isCancelled returns false for null" {
+    try std.testing.expectEqual(false, isCancelled(null));
+}
+
+test "isCancelled returns false when not cancelled" {
+    var cancelled = std.atomic.Value(bool).init(false);
+    try std.testing.expectEqual(false, isCancelled(&cancelled));
+}
+
+test "isCancelled returns true when cancelled" {
+    var cancelled = std.atomic.Value(bool).init(true);
+    try std.testing.expectEqual(true, isCancelled(&cancelled));
+}
+
+test "writeJsonEscapedString handles special characters" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    const writer = buf.writer(alloc);
+
+    try writeJsonEscapedString(writer, "hello\nworld\t\"test\"\\path");
+
+    try std.testing.expectEqualStrings("hello\\nworld\\t\\\"test\\\"\\\\path", buf.items);
+}
+
+test "writeJsonEscapedString handles control characters" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    const writer = buf.writer(alloc);
+
+    try writeJsonEscapedString(writer, "a\x01b");
+
+    // Control character 0x01 should be escaped as \u0001
+    try std.testing.expectEqualStrings("a\\u0001b", buf.items);
+}
+
+test "StreamChunk done flag semantics" {
+    // Test that done=true signals end of stream
+    const chunk_final = StreamChunk{ .content = "", .done = true };
+    try std.testing.expect(chunk_final.done);
+    try std.testing.expectEqual(@as(usize, 0), chunk_final.content.len);
+
+    // Test that done=false signals more content coming
+    const chunk_partial = StreamChunk{ .content = "hello", .done = false };
+    try std.testing.expect(!chunk_partial.done);
+    try std.testing.expectEqualStrings("hello", chunk_partial.content);
+}

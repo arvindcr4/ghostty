@@ -289,7 +289,6 @@ pub const NotificationCenter = extern struct {
         }
     }
 
-
     pub fn addNotification(self: *Self, title: []const u8, message: []const u8, notification_type: NotificationItem.NotificationType, action_label: ?[]const u8, action_id: ?[]const u8) void {
         const priv = getPriv(self);
         const alloc = Application.default().allocator();
