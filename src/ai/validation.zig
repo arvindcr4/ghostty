@@ -165,19 +165,35 @@ pub const CommandValidator = struct {
         if (std.mem.indexOf(u8, command, pattern) != null) {
             return true;
         }
-        // Check for pattern with quotes around arguments
-        var quoted_pattern = std.ArrayList(u8).init(std.heap.page_allocator);
-        defer quoted_pattern.deinit();
-        quoted_pattern.writer().print("\"{s}\"", .{pattern}) catch return false;
-        if (std.mem.indexOf(u8, command, quoted_pattern.items) != null) {
+
+        // Use stack buffer for quoted pattern matching to avoid heap allocation
+        // and fail closed if pattern is too long
+        var buffer: [512]u8 = undefined;
+        const max_pattern_len = 510; // 512 - 2 for quotes
+
+        if (pattern.len > max_pattern_len) {
+            // Pattern too long - fail closed for safety
             return true;
         }
+
+        // Check for pattern with double quotes
+        buffer[0] = '"';
+        @memcpy(buffer[1..][0..pattern.len], pattern);
+        buffer[1 + pattern.len] = '"';
+        const double_quoted = buffer[0 .. 2 + pattern.len];
+        if (std.mem.indexOf(u8, command, double_quoted) != null) {
+            return true;
+        }
+
         // Check for pattern with single quotes
-        quoted_pattern.clearRetainingCapacity();
-        quoted_pattern.writer().print("'{s}'", .{pattern}) catch return false;
-        if (std.mem.indexOf(u8, command, quoted_pattern.items) != null) {
+        buffer[0] = '\'';
+        @memcpy(buffer[1..][0..pattern.len], pattern);
+        buffer[1 + pattern.len] = '\'';
+        const single_quoted = buffer[0 .. 2 + pattern.len];
+        if (std.mem.indexOf(u8, command, single_quoted) != null) {
             return true;
         }
+
         return false;
     }
 
