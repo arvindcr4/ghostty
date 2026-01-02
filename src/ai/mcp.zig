@@ -18,6 +18,7 @@ const StringHashMap = std.StringHashMap;
 const json = std.json;
 
 const log = std.log.scoped(.ai_mcp);
+const CommandValidator = @import("validation.zig").CommandValidator;
 
 /// JSON-RPC 2.0 request structure
 pub const JsonRpcRequest = struct {
@@ -708,7 +709,47 @@ fn gitLogTool(params: json.Value, alloc: Allocator) !json.Value {
 fn executeCommandTool(params: json.Value, alloc: Allocator) !json.Value {
     const command_str = if (params.object.get("command")) |c| c.string else return error.MissingCommand;
 
-    // Security: Only allow safe, read-only commands
+    // Validate command using CommandValidator
+    var validator = CommandValidator.init(alloc);
+    var validation_result = try validator.validate(command_str);
+    defer validation_result.deinit(alloc);
+
+    // Check if command is valid and safe
+    if (!validation_result.valid) {
+        var result = json.ObjectMap.init(alloc);
+        try result.put("success", json.Value{ .bool = false });
+        
+        // Collect all error messages
+        var error_msg = std.ArrayList(u8).init(alloc);
+        defer error_msg.deinit();
+        try error_msg.writer().print("Command validation failed: ", .{});
+        
+        if (validation_result.errors.items.len > 0) {
+            for (validation_result.errors.items, 0..) |err, i| {
+                if (i > 0) try error_msg.writer().print("; ", .{});
+                try error_msg.writer().print("{s}", .{err});
+            }
+        }
+        
+        try result.put("error", json.Value{ .string = try error_msg.toOwnedSlice() });
+        if (validation_result.warnings.items.len > 0) {
+            var warnings = json.Array.init(alloc);
+            for (validation_result.warnings.items) |warn| {
+                try warnings.append(json.Value{ .string = warn });
+            }
+            try result.put("warnings", json.Value{ .array = warnings });
+        }
+        return json.Value{ .object = result };
+    }
+
+    // Log warnings if any
+    if (validation_result.warnings.items.len > 0) {
+        for (validation_result.warnings.items) |warn| {
+            log.warn("Command validation warning: {s}", .{warn});
+        }
+    }
+
+    // Additional safety: Only allow safe, read-only commands as a secondary check
     const allowed_prefixes = [_][]const u8{
         "ls",       "pwd",    "whoami",  "date",
         "uname",    "echo",   "which",   "cat",
@@ -729,7 +770,7 @@ fn executeCommandTool(params: json.Value, alloc: Allocator) !json.Value {
     if (!is_allowed) {
         var result = json.ObjectMap.init(alloc);
         try result.put("success", json.Value{ .bool = false });
-        try result.put("error", json.Value{ .string = "Command not allowed for security reasons" });
+        try result.put("error", json.Value{ .string = "Command not in allowed list for security reasons" });
         return json.Value{ .object = result };
     }
 

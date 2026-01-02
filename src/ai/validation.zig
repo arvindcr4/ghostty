@@ -82,26 +82,41 @@ pub const CommandValidator = struct {
             .{ .pattern = "mkfs", .risk = .high, .message = "High risk: Filesystem creation", .match_fn = matchDangerousPattern },
             .{ .pattern = "fdisk", .risk = .high, .message = "High risk: Partition operations", .match_fn = matchDangerousPattern },
             .{ .pattern = "chmod 777", .risk = .medium, .message = "Warning: Overly permissive permissions", .match_fn = matchDangerousPattern },
+            .{ .pattern = "chmod 000", .risk = .medium, .message = "Warning: Removing all permissions", .match_fn = matchDangerousPattern },
             .{ .pattern = "sudo rm", .risk = .medium, .message = "Warning: Elevated deletion", .match_fn = matchDangerousPattern },
             .{ .pattern = "> /dev/sd", .risk = .high, .message = "High risk: Writing to block device", .match_fn = matchDangerousPattern },
+            .{ .pattern = "> /dev/null", .risk = .safe, .message = "", .match_fn = matchDangerousPattern }, // Safe, but included for completeness
             .{ .pattern = "| bash", .risk = .high, .message = "High risk: Piping to shell interpreter", .match_fn = matchDangerousPattern },
             .{ .pattern = "| sh", .risk = .high, .message = "High risk: Piping to shell interpreter", .match_fn = matchDangerousPattern },
+            .{ .pattern = "| zsh", .risk = .high, .message = "High risk: Piping to shell interpreter", .match_fn = matchDangerousPattern },
             .{ .pattern = "curl.*|", .risk = .high, .message = "High risk: Piping curl output", .match_fn = matchCommandInjection },
             .{ .pattern = "wget.*|", .risk = .high, .message = "High risk: Piping wget output", .match_fn = matchCommandInjection },
             .{ .pattern = "../", .risk = .medium, .message = "Warning: Path traversal attempt", .match_fn = matchPathTraversal },
             .{ .pattern = "..", .risk = .low, .message = "Warning: Potential path traversal", .match_fn = matchPathTraversal },
+            .{ .pattern = "format c:", .risk = .high, .message = "High risk: Formatting disk", .match_fn = matchDangerousPattern },
+            .{ .pattern = "del /f /s /q", .risk = .high, .message = "High risk: Force deletion", .match_fn = matchDangerousPattern },
         };
+
+        // Helper function to update risk level only if new risk is higher
+        const updateRiskLevel = struct {
+            fn call(result: *ValidationResult, new_risk: ValidationResult.RiskLevel) void {
+                if (@intFromEnum(new_risk) > @intFromEnum(result.risk_level)) {
+                    result.risk_level = new_risk;
+                }
+            }
+        }.call;
 
         for (dangerous_patterns) |danger| {
             if (danger.match_fn(normalized, danger.pattern)) {
-                if (@intFromEnum(danger.risk) > @intFromEnum(result.risk_level)) {
-                    result.risk_level = danger.risk;
-                }
+                // Skip safe patterns (they're included for completeness but shouldn't trigger warnings)
+                if (danger.risk == .safe) continue;
+                
+                updateRiskLevel(&result, danger.risk);
 
                 if (danger.risk == .dangerous) {
                     try result.errors.append(try self.alloc.dupe(u8, danger.message));
                     result.valid = false;
-                } else {
+                } else if (danger.message.len > 0) {
                     try result.warnings.append(try self.alloc.dupe(u8, danger.message));
                 }
             }
@@ -109,36 +124,28 @@ pub const CommandValidator = struct {
 
         // Check for command injection patterns
         if (self.detectCommandInjection(normalized)) {
-            if (@intFromEnum(ValidationResult.RiskLevel.high) > @intFromEnum(result.risk_level)) {
-                result.risk_level = .high;
-            }
+            updateRiskLevel(&result, .high);
             try result.errors.append(try self.alloc.dupe(u8, "Dangerous: Potential command injection detected"));
             result.valid = false;
         }
 
         // Check for shell metacharacters in suspicious contexts
         if (self.detectShellMetacharacters(normalized)) {
-            if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
-                result.risk_level = .medium;
-            }
+            updateRiskLevel(&result, .medium);
             try result.warnings.append(try self.alloc.dupe(u8, "Warning: Shell metacharacters detected"));
         }
 
         // Check for sudo usage
         if (std.mem.startsWith(u8, normalized, "sudo ") or std.mem.indexOf(u8, normalized, " sudo ") != null) {
-            if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
-                result.risk_level = .medium;
-            }
+            updateRiskLevel(&result, .medium);
             try result.warnings.append(try self.alloc.dupe(u8, "Warning: Command requires elevated privileges"));
         }
 
-        // Check for network operations
+        // Check for network operations (only upgrade if currently safe)
         if (std.mem.indexOf(u8, normalized, "curl") != null or
             std.mem.indexOf(u8, normalized, "wget") != null)
         {
-            if (@intFromEnum(ValidationResult.RiskLevel.low) > @intFromEnum(result.risk_level)) {
-                result.risk_level = .low;
-            }
+            updateRiskLevel(&result, .low);
         }
 
         // Block dangerous commands if not allowed
@@ -249,6 +256,16 @@ pub const CommandValidator = struct {
         // Check for $(command) or `command` patterns
         if (std.mem.indexOf(u8, command, "$(") != null or std.mem.indexOf(u8, command, "`") != null) {
             return true;
+        }
+        // Check for ${VAR} expansion in suspicious contexts
+        if (std.mem.indexOf(u8, command, "${") != null) {
+            // Check if it's used with dangerous commands
+            const dangerous_after_expansion = [_][]const u8{ "rm", "del", "format", "mkfs", "dd" };
+            for (dangerous_after_expansion) |danger| {
+                if (std.mem.indexOf(u8, command, danger) != null) {
+                    return true;
+                }
+            }
         }
         return false;
     }
