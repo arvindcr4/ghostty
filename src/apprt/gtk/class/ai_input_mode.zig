@@ -68,6 +68,11 @@ const WorkflowBuilderDialog = @import("ai_workflow_builder.zig").WorkflowBuilder
 const OutputExportDialog = @import("ai_output_export.zig").OutputExportDialog;
 const ThemesGalleryDialog = @import("ai_themes_gallery.zig").ThemesGalleryDialog;
 const VisualBlocksEnhancedDialog = @import("ai_visual_blocks_enhanced.zig").VisualBlocksEnhancedDialog;
+const CommandHistorySearchDialog = @import("ai_command_history_search.zig").CommandHistorySearchDialog;
+const TerminalProfilesDialog = @import("ai_terminal_profiles.zig").TerminalProfilesDialog;
+const SmartSuggestionsPanel = @import("ai_smart_suggestions.zig").SmartSuggestionsPanel;
+const OutputComparisonDialog = @import("ai_output_comparison.zig").OutputComparisonDialog;
+const CommandBuilderDialog = @import("ai_command_builder.zig").CommandBuilderDialog;
 const VoiceInputManager = @import("../../../ai/voice.zig").VoiceInputManager;
 const VoiceInputResult = @import("../../../ai/voice.zig").VoiceInputResult;
 const VoiceBackend = @import("../../../ai/voice.zig").VoiceBackend;
@@ -388,6 +393,11 @@ pub const AiInputMode = extern struct {
         output_export_dialog: ?*OutputExportDialog = null,
         themes_gallery_dialog: ?*ThemesGalleryDialog = null,
         visual_blocks_enhanced_dialog: ?*VisualBlocksEnhancedDialog = null,
+        command_history_search_dialog: ?*CommandHistorySearchDialog = null,
+        terminal_profiles_dialog: ?*TerminalProfilesDialog = null,
+        smart_suggestions_panel: ?*SmartSuggestionsPanel = null,
+        output_comparison_dialog: ?*OutputComparisonDialog = null,
+        command_builder_dialog: ?*CommandBuilderDialog = null,
 
         /// Flag to track if object has been disposed (prevents use-after-free)
         is_disposed: bool = false,
@@ -795,6 +805,26 @@ pub const AiInputMode = extern struct {
         if (priv.visual_blocks_enhanced_dialog) |dialog| {
             dialog.unref();
             priv.visual_blocks_enhanced_dialog = null;
+        }
+        if (priv.command_history_search_dialog) |dialog| {
+            dialog.unref();
+            priv.command_history_search_dialog = null;
+        }
+        if (priv.terminal_profiles_dialog) |dialog| {
+            dialog.unref();
+            priv.terminal_profiles_dialog = null;
+        }
+        if (priv.smart_suggestions_panel) |panel| {
+            panel.unref();
+            priv.smart_suggestions_panel = null;
+        }
+        if (priv.output_comparison_dialog) |dialog| {
+            dialog.unref();
+            priv.output_comparison_dialog = null;
+        }
+        if (priv.command_builder_dialog) |dialog| {
+            dialog.unref();
+            priv.command_builder_dialog = null;
         }
 
         // Clean up tab completion overlay if created
@@ -2981,6 +3011,31 @@ pub const AiInputMode = extern struct {
         _ = gio.SimpleAction.signals.activate.connect(visual_blocks_enhanced_action, *Self, showVisualBlocksEnhanced, self, .{});
         action_group.addAction(visual_blocks_enhanced_action);
 
+        // Command history search action
+        const command_history_search_action = gio.SimpleAction.new("show-command-history-search", null);
+        _ = gio.SimpleAction.signals.activate.connect(command_history_search_action, *Self, showCommandHistorySearch, self, .{});
+        action_group.addAction(command_history_search_action);
+
+        // Terminal profiles action
+        const terminal_profiles_action = gio.SimpleAction.new("show-terminal-profiles", null);
+        _ = gio.SimpleAction.signals.activate.connect(terminal_profiles_action, *Self, showTerminalProfiles, self, .{});
+        action_group.addAction(terminal_profiles_action);
+
+        // Smart suggestions action
+        const smart_suggestions_action = gio.SimpleAction.new("show-smart-suggestions", null);
+        _ = gio.SimpleAction.signals.activate.connect(smart_suggestions_action, *Self, showSmartSuggestions, self, .{});
+        action_group.addAction(smart_suggestions_action);
+
+        // Output comparison action
+        const output_comparison_action = gio.SimpleAction.new("show-output-comparison", null);
+        _ = gio.SimpleAction.signals.activate.connect(output_comparison_action, *Self, showOutputComparison, self, .{});
+        action_group.addAction(output_comparison_action);
+
+        // Command builder action
+        const command_builder_action = gio.SimpleAction.new("show-command-builder", null);
+        _ = gio.SimpleAction.signals.activate.connect(command_builder_action, *Self, showCommandBuilder, self, .{});
+        action_group.addAction(command_builder_action);
+
         // Insert action group
         self.as(gtk.Widget).insertActionGroup("ai", action_group.as(gio.ActionGroup));
     }
@@ -3409,6 +3464,76 @@ pub const AiInputMode = extern struct {
         const dialog = priv.visual_blocks_enhanced_dialog orelse blk: {
             const new_dialog = VisualBlocksEnhancedDialog.new();
             priv.visual_blocks_enhanced_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showCommandHistorySearch(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.command_history_search_dialog orelse blk: {
+            const new_dialog = CommandHistorySearchDialog.new();
+            priv.command_history_search_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showTerminalProfiles(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.terminal_profiles_dialog orelse blk: {
+            const new_dialog = TerminalProfilesDialog.new();
+            priv.terminal_profiles_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showSmartSuggestions(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const panel = priv.smart_suggestions_panel orelse blk: {
+            const new_panel = SmartSuggestionsPanel.new();
+            priv.smart_suggestions_panel = new_panel;
+            break :blk new_panel;
+        };
+        panel.show(win);
+    }
+
+    fn showOutputComparison(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.output_comparison_dialog orelse blk: {
+            const new_dialog = OutputComparisonDialog.new();
+            priv.output_comparison_dialog = new_dialog;
+            break :blk new_dialog;
+        };
+        dialog.show(win);
+    }
+
+    fn showCommandBuilder(action: *gio.SimpleAction, param: ?*glib.Variant, self: *Self) callconv(.c) void {
+        _ = action;
+        _ = param;
+        const priv = getPriv(self);
+
+        const win = priv.window orelse return;
+        const dialog = priv.command_builder_dialog orelse blk: {
+            const new_dialog = CommandBuilderDialog.new();
+            priv.command_builder_dialog = new_dialog;
             break :blk new_dialog;
         };
         dialog.show(win);
