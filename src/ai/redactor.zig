@@ -44,8 +44,11 @@ pub const Redactor = struct {
             .enabled_patterns = StringHashMap(bool).init(alloc),
         };
 
-        // Add default rules
-        redactor.addDefaultRules() catch {};
+        // Add default rules - log errors instead of silently failing
+        redactor.addDefaultRules() catch |err| {
+            log.err("Failed to add default redaction rules: {}", .{err});
+            // Continue initialization even if some rules fail, but log the error
+        };
 
         return redactor;
     }
@@ -278,13 +281,13 @@ pub const Redactor = struct {
 
         var last_end: usize = 0;
         for (matches.items) |match_str| {
-            // Find this match in original input
-            const match_start = std.mem.indexOf(u8, input[last_end..], match_str) orelse continue;
-            const abs_start = last_end + match_start;
-            const abs_end = abs_start + match_str.len;
+            // Find this match in original input, starting from last_end
+            // Use indexOfPos to avoid finding the same match twice
+            const match_start = std.mem.indexOfPos(u8, input, last_end, match_str) orelse continue;
+            const abs_end = match_start + match_str.len;
 
             // Append everything before the match
-            try result.appendSlice(input[last_end..abs_start]);
+            try result.appendSlice(input[last_end..match_start]);
 
             // Append replacement
             try result.appendSlice(rule.replacement);
@@ -343,17 +346,23 @@ const Regex = struct {
         .{ .pattern = "(sk-|sk-proj-)[a-zA-Z0-9_-]{20,}", .prefix = "sk-", .min_length = 23 },
         // Anthropic
         .{ .pattern = "sk-ant-[a-zA-Z0-9_-]{20,}", .prefix = "sk-ant-", .min_length = 27 },
-        // GitHub tokens
+        // GitHub tokens - each type with specific prefix
         .{ .pattern = "ghp_[a-zA-Z0-9]{36}", .prefix = "ghp_", .min_length = 40 },
         .{ .pattern = "gho_[a-zA-Z0-9]{36}", .prefix = "gho_", .min_length = 40 },
-        .{ .pattern = "(ghu|ghs|ghr)_[a-zA-Z0-9]{36}", .prefix = "ghu_", .min_length = 40 },
-        // Slack
-        .{ .pattern = "xox[baprs]-[a-zA-Z0-9-]{10,}", .prefix = "xoxb-", .min_length = 15 },
+        .{ .pattern = "ghu_[a-zA-Z0-9]{36}", .prefix = "ghu_", .min_length = 40 },
+        .{ .pattern = "ghs_[a-zA-Z0-9]{36}", .prefix = "ghs_", .min_length = 40 },
+        .{ .pattern = "ghr_[a-zA-Z0-9]{36}", .prefix = "ghr_", .min_length = 40 },
+        // Slack tokens - each type with specific prefix
+        .{ .pattern = "xoxb-[a-zA-Z0-9-]{10,}", .prefix = "xoxb-", .min_length = 15 },
+        .{ .pattern = "xoxa-[a-zA-Z0-9-]{10,}", .prefix = "xoxa-", .min_length = 15 },
+        .{ .pattern = "xoxp-[a-zA-Z0-9-]{10,}", .prefix = "xoxp-", .min_length = 15 },
+        .{ .pattern = "xoxr-[a-zA-Z0-9-]{10,}", .prefix = "xoxr-", .min_length = 15 },
+        .{ .pattern = "xoxs-[a-zA-Z0-9-]{10,}", .prefix = "xoxs-", .min_length = 15 },
         // AWS
         .{ .pattern = "AKIA[0-9A-Z]{16}", .prefix = "AKIA", .min_length = 20 },
         // Google
         .{ .pattern = "AIza[A-Za-z0-9_-]{35}", .prefix = "AIza", .min_length = 39 },
-        .{ .pattern = "ya29\\.[a-zA-Z0-9_-]{100,}", .prefix = "ya29.", .min_length = 105 },
+        .{ .pattern = "ya29\\.[a-zA-Z0-9_-]{20,}", .prefix = "ya29.", .min_length = 25 },
         // Stripe
         .{ .pattern = "sk_live_[a-zA-Z0-9]{24,}", .prefix = "sk_live_", .min_length = 32 },
         .{ .pattern = "sk_test_[a-zA-Z0-9]{24,}", .prefix = "sk_test_", .min_length = 32 },

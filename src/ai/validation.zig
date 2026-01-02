@@ -65,24 +65,35 @@ pub const CommandValidator = struct {
             return result;
         }
 
-        // Check for dangerous patterns
+        // Normalize command: trim whitespace, handle quotes
+        const normalized = self.normalizeCommand(command);
+
+        // Check for dangerous patterns with improved matching
         const dangerous_patterns = [_]struct {
             pattern: []const u8,
             risk: ValidationResult.RiskLevel,
             message: []const u8,
+            match_fn: fn ([]const u8, []const u8) bool,
         }{
-            .{ .pattern = "rm -rf /", .risk = .dangerous, .message = "Dangerous: Removing root filesystem" },
-            .{ .pattern = "rm -rf ~", .risk = .dangerous, .message = "Dangerous: Removing home directory" },
-            .{ .pattern = "dd if=", .risk = .high, .message = "High risk: Disk operations" },
-            .{ .pattern = "mkfs", .risk = .high, .message = "High risk: Filesystem creation" },
-            .{ .pattern = "fdisk", .risk = .high, .message = "High risk: Partition operations" },
-            .{ .pattern = "chmod 777", .risk = .medium, .message = "Warning: Overly permissive permissions" },
-            .{ .pattern = "sudo rm", .risk = .medium, .message = "Warning: Elevated deletion" },
-            .{ .pattern = "> /dev/sd", .risk = .high, .message = "High risk: Writing to block device" },
+            .{ .pattern = "rm -rf /", .risk = .dangerous, .message = "Dangerous: Removing root filesystem", .match_fn = matchDangerousPattern },
+            .{ .pattern = "rm -rf ~", .risk = .dangerous, .message = "Dangerous: Removing home directory", .match_fn = matchDangerousPattern },
+            .{ .pattern = "rm -rf", .risk = .high, .message = "High risk: Recursive deletion", .match_fn = matchDangerousPattern },
+            .{ .pattern = "dd if=", .risk = .high, .message = "High risk: Disk operations", .match_fn = matchDangerousPattern },
+            .{ .pattern = "mkfs", .risk = .high, .message = "High risk: Filesystem creation", .match_fn = matchDangerousPattern },
+            .{ .pattern = "fdisk", .risk = .high, .message = "High risk: Partition operations", .match_fn = matchDangerousPattern },
+            .{ .pattern = "chmod 777", .risk = .medium, .message = "Warning: Overly permissive permissions", .match_fn = matchDangerousPattern },
+            .{ .pattern = "sudo rm", .risk = .medium, .message = "Warning: Elevated deletion", .match_fn = matchDangerousPattern },
+            .{ .pattern = "> /dev/sd", .risk = .high, .message = "High risk: Writing to block device", .match_fn = matchDangerousPattern },
+            .{ .pattern = "| bash", .risk = .high, .message = "High risk: Piping to shell interpreter", .match_fn = matchDangerousPattern },
+            .{ .pattern = "| sh", .risk = .high, .message = "High risk: Piping to shell interpreter", .match_fn = matchDangerousPattern },
+            .{ .pattern = "curl.*|", .risk = .high, .message = "High risk: Piping curl output", .match_fn = matchCommandInjection },
+            .{ .pattern = "wget.*|", .risk = .high, .message = "High risk: Piping wget output", .match_fn = matchCommandInjection },
+            .{ .pattern = "../", .risk = .medium, .message = "Warning: Path traversal attempt", .match_fn = matchPathTraversal },
+            .{ .pattern = "..", .risk = .low, .message = "Warning: Potential path traversal", .match_fn = matchPathTraversal },
         };
 
         for (dangerous_patterns) |danger| {
-            if (std.mem.indexOf(u8, command, danger.pattern)) |_| {
+            if (danger.match_fn(normalized, danger.pattern)) {
                 if (@intFromEnum(danger.risk) > @intFromEnum(result.risk_level)) {
                     result.risk_level = danger.risk;
                 }
@@ -96,8 +107,25 @@ pub const CommandValidator = struct {
             }
         }
 
+        // Check for command injection patterns
+        if (self.detectCommandInjection(normalized)) {
+            if (@intFromEnum(ValidationResult.RiskLevel.high) > @intFromEnum(result.risk_level)) {
+                result.risk_level = .high;
+            }
+            try result.errors.append(try self.alloc.dupe(u8, "Dangerous: Potential command injection detected"));
+            result.valid = false;
+        }
+
+        // Check for shell metacharacters in suspicious contexts
+        if (self.detectShellMetacharacters(normalized)) {
+            if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
+                result.risk_level = .medium;
+            }
+            try result.warnings.append(try self.alloc.dupe(u8, "Warning: Shell metacharacters detected"));
+        }
+
         // Check for sudo usage
-        if (std.mem.startsWith(u8, command, "sudo ")) {
+        if (std.mem.startsWith(u8, normalized, "sudo ") or std.mem.indexOf(u8, normalized, " sudo ") != null) {
             if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
                 result.risk_level = .medium;
             }
@@ -105,8 +133,8 @@ pub const CommandValidator = struct {
         }
 
         // Check for network operations
-        if (std.mem.indexOf(u8, command, "curl") != null or
-            std.mem.indexOf(u8, command, "wget") != null)
+        if (std.mem.indexOf(u8, normalized, "curl") != null or
+            std.mem.indexOf(u8, normalized, "wget") != null)
         {
             if (@intFromEnum(ValidationResult.RiskLevel.low) > @intFromEnum(result.risk_level)) {
                 result.risk_level = .low;
@@ -119,6 +147,112 @@ pub const CommandValidator = struct {
         }
 
         return result;
+    }
+
+    /// Normalize command for pattern matching
+    fn normalizeCommand(self: *const CommandValidator, command: []const u8) []const u8 {
+        _ = self;
+        // Remove leading/trailing whitespace
+        const trimmed = std.mem.trim(u8, command, " \t\n\r");
+        // TODO: Handle quoted strings properly
+        // For now, return trimmed version
+        return trimmed;
+    }
+
+    /// Match dangerous pattern with improved matching
+    fn matchDangerousPattern(command: []const u8, pattern: []const u8) bool {
+        // Check for exact substring match
+        if (std.mem.indexOf(u8, command, pattern) != null) {
+            return true;
+        }
+        // Check for pattern with quotes around arguments
+        var quoted_pattern = std.ArrayList(u8).init(std.heap.page_allocator);
+        defer quoted_pattern.deinit();
+        quoted_pattern.writer().print("\"{s}\"", .{pattern}) catch return false;
+        if (std.mem.indexOf(u8, command, quoted_pattern.items) != null) {
+            return true;
+        }
+        // Check for pattern with single quotes
+        quoted_pattern.clearRetainingCapacity();
+        quoted_pattern.writer().print("'{s}'", .{pattern}) catch return false;
+        if (std.mem.indexOf(u8, command, quoted_pattern.items) != null) {
+            return true;
+        }
+        return false;
+    }
+
+    /// Match command injection patterns
+    fn matchCommandInjection(command: []const u8, pattern: []const u8) bool {
+        // Check for pattern followed by pipe or semicolon
+        if (std.mem.indexOf(u8, command, pattern)) |idx| {
+            const after_pattern = command[idx + pattern.len..];
+            // Check if followed by shell metacharacters
+            if (std.mem.indexOfAny(u8, after_pattern, "|;&`$(){}[]") != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Match path traversal patterns
+    fn matchPathTraversal(command: []const u8, pattern: []const u8) bool {
+        // Check for path traversal in file operations
+        if (std.mem.indexOf(u8, command, pattern)) |idx| {
+            // Check if it's in a file path context
+            const before = command[0..idx];
+            const after = command[idx + pattern.len..];
+            // Look for file operations before or after
+            const file_ops = [_][]const u8{ "cat ", "rm ", "cp ", "mv ", "chmod ", "chown ", "ls ", "find ", "grep ", "sed ", "awk " };
+            for (file_ops) |op| {
+                if (std.mem.indexOf(u8, before, op) != null or std.mem.indexOf(u8, after, op) != null) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Detect command injection attempts
+    fn detectCommandInjection(self: *const CommandValidator, command: []const u8) bool {
+        _ = self;
+        // Check for command chaining
+        const chain_chars = [_]u8{ '|', ';', '&', '`', '$', '(', ')' };
+        var chain_count: usize = 0;
+        for (command) |c| {
+            for (chain_chars) |ch| {
+                if (c == ch) {
+                    chain_count += 1;
+                    break;
+                }
+            }
+        }
+        // Multiple chain characters suggest injection
+        if (chain_count > 2) {
+            return true;
+        }
+        // Check for $(command) or `command` patterns
+        if (std.mem.indexOf(u8, command, "$(") != null or std.mem.indexOf(u8, command, "`") != null) {
+            return true;
+        }
+        return false;
+    }
+
+    /// Detect shell metacharacters in suspicious contexts
+    fn detectShellMetacharacters(self: *const CommandValidator, command: []const u8) bool {
+        _ = self;
+        // Check for metacharacters that could be dangerous
+        const dangerous_chars = [_]u8{ '>', '<', '|', '&', ';', '`', '$', '(', ')', '{', '}', '[', ']', '*', '?', '~' };
+        var found_count: usize = 0;
+        for (command) |c| {
+            for (dangerous_chars) |ch| {
+                if (c == ch) {
+                    found_count += 1;
+                    break;
+                }
+            }
+        }
+        // Multiple metacharacters suggest potential issues
+        return found_count > 3;
     }
 
     /// Enable or disable validation
