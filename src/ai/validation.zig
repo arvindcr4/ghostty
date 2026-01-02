@@ -55,6 +55,72 @@ pub const CommandValidator = struct {
         };
     }
 
+    /// Normalize whitespace in command for pattern matching
+    /// Collapses multiple spaces/tabs into single space
+    fn normalizeWhitespace(self: *const CommandValidator, command: []const u8) ![]const u8 {
+        var normalized: std.ArrayList(u8) = .{};
+        errdefer normalized.deinit(self.alloc);
+
+        var prev_space = true; // Start true to trim leading whitespace
+        for (command) |c| {
+            if (c == ' ' or c == '\t') {
+                if (!prev_space) {
+                    try normalized.append(self.alloc, ' ');
+                    prev_space = true;
+                }
+            } else {
+                try normalized.append(self.alloc, c);
+                prev_space = false;
+            }
+        }
+
+        // Trim trailing whitespace
+        while (normalized.items.len > 0 and normalized.items[normalized.items.len - 1] == ' ') {
+            _ = normalized.pop();
+        }
+
+        return normalized.toOwnedSlice(self.alloc);
+    }
+
+    /// Check if command contains 'rm' with both -r/-R and -f flags
+    fn hasRmRecursiveForce(command: []const u8) bool {
+        // Look for 'rm' command
+        if (std.mem.indexOf(u8, command, "rm ")) |rm_pos| {
+            const after_rm = command[rm_pos + 3 ..];
+            // Check for recursive flag (-r, -R, --recursive)
+            const has_recursive = std.mem.indexOf(u8, after_rm, "-r") != null or
+                std.mem.indexOf(u8, after_rm, "-R") != null or
+                std.mem.indexOf(u8, after_rm, "--recursive") != null;
+            // Check for force flag (-f, --force)
+            const has_force = std.mem.indexOf(u8, after_rm, "-f") != null or
+                std.mem.indexOf(u8, after_rm, "--force") != null;
+            return has_recursive and has_force;
+        }
+        return false;
+    }
+
+    /// Check if command targets root or home directory
+    fn targetsRootOrHome(command: []const u8) bool {
+        // Check for / at end or followed by space (root)
+        if (std.mem.endsWith(u8, command, " /") or std.mem.indexOf(u8, command, " / ") != null) {
+            return true;
+        }
+        // Check for ~ at end or followed by space (home)
+        if (std.mem.endsWith(u8, command, " ~") or std.mem.indexOf(u8, command, " ~ ") != null) {
+            return true;
+        }
+        // Check for explicit paths
+        if (std.mem.indexOf(u8, command, " /bin") != null or
+            std.mem.indexOf(u8, command, " /etc") != null or
+            std.mem.indexOf(u8, command, " /usr") != null or
+            std.mem.indexOf(u8, command, " /var") != null or
+            std.mem.indexOf(u8, command, " /home") != null)
+        {
+            return true;
+        }
+        return false;
+    }
+
     /// Validate a command
     pub fn validate(self: *const CommandValidator, command: []const u8) !ValidationResult {
         var result = ValidationResult.init();
@@ -65,31 +131,42 @@ pub const CommandValidator = struct {
             return result;
         }
 
-        // Check for dangerous patterns
+        // Normalize command whitespace for consistent pattern matching
+        const normalized = try self.normalizeWhitespace(command);
+        defer self.alloc.free(normalized);
+
+        // Check for dangerous rm patterns (handles flag variations)
+        if (hasRmRecursiveForce(normalized) and targetsRootOrHome(normalized)) {
+            result.risk_level = .dangerous;
+            try result.errors.append(self.alloc, try self.alloc.dupe(u8, "Dangerous: Recursive forced deletion of critical directory"));
+            if (!self.allow_dangerous) {
+                result.valid = false;
+            }
+        }
+
+        // Check for other dangerous patterns
         const dangerous_patterns = [_]struct {
             pattern: []const u8,
             risk: ValidationResult.RiskLevel,
             message: []const u8,
         }{
-            .{ .pattern = "rm -rf /", .risk = .dangerous, .message = "Dangerous: Removing root filesystem" },
-            .{ .pattern = "rm -rf ~", .risk = .dangerous, .message = "Dangerous: Removing home directory" },
             .{ .pattern = "dd if=", .risk = .high, .message = "High risk: Disk operations" },
             .{ .pattern = "mkfs", .risk = .high, .message = "High risk: Filesystem creation" },
             .{ .pattern = "fdisk", .risk = .high, .message = "High risk: Partition operations" },
             .{ .pattern = "chmod 777", .risk = .medium, .message = "Warning: Overly permissive permissions" },
-            .{ .pattern = "sudo rm", .risk = .medium, .message = "Warning: Elevated deletion" },
             .{ .pattern = "> /dev/sd", .risk = .high, .message = "High risk: Writing to block device" },
+            .{ .pattern = "> /dev/nvme", .risk = .high, .message = "High risk: Writing to block device" },
+            .{ .pattern = ":(){ :|:& };:", .risk = .dangerous, .message = "Dangerous: Fork bomb detected" },
         };
 
         for (dangerous_patterns) |danger| {
-            if (std.mem.indexOf(u8, command, danger.pattern)) |_| {
+            if (std.mem.indexOf(u8, normalized, danger.pattern)) |_| {
                 if (@intFromEnum(danger.risk) > @intFromEnum(result.risk_level)) {
                     result.risk_level = danger.risk;
                 }
 
                 if (danger.risk == .dangerous) {
                     try result.errors.append(self.alloc, try self.alloc.dupe(u8, danger.message));
-                    // Only invalidate if dangerous commands are not allowed
                     if (!self.allow_dangerous) {
                         result.valid = false;
                     }
@@ -99,17 +176,25 @@ pub const CommandValidator = struct {
             }
         }
 
-        // Check for sudo usage
-        if (std.mem.startsWith(u8, command, "sudo ")) {
+        // Check for sudo usage (with normalized whitespace)
+        if (std.mem.startsWith(u8, normalized, "sudo ")) {
             if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
                 result.risk_level = .medium;
             }
             try result.warnings.append(self.alloc, try self.alloc.dupe(u8, "Warning: Command requires elevated privileges"));
+
+            // Check for sudo rm specifically
+            if (std.mem.indexOf(u8, normalized, "sudo rm") != null) {
+                if (@intFromEnum(ValidationResult.RiskLevel.medium) > @intFromEnum(result.risk_level)) {
+                    result.risk_level = .medium;
+                }
+                try result.warnings.append(self.alloc, try self.alloc.dupe(u8, "Warning: Elevated deletion"));
+            }
         }
 
         // Check for network operations
-        if (std.mem.indexOf(u8, command, "curl") != null or
-            std.mem.indexOf(u8, command, "wget") != null)
+        if (std.mem.indexOf(u8, normalized, "curl") != null or
+            std.mem.indexOf(u8, normalized, "wget") != null)
         {
             if (@intFromEnum(ValidationResult.RiskLevel.low) > @intFromEnum(result.risk_level)) {
                 result.risk_level = .low;
@@ -239,4 +324,42 @@ test "ValidationResult.init creates valid result" {
     try std.testing.expectEqual(ValidationResult.RiskLevel.safe, result.risk_level);
     try std.testing.expect(result.errors.items.len == 0);
     try std.testing.expect(result.warnings.items.len == 0);
+}
+
+test "CommandValidator.validate detects rm with extra whitespace" {
+    const validator = CommandValidator.init(std.testing.allocator);
+    // Extra spaces should still be detected
+    var result = try validator.validate("rm  -rf   /");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(ValidationResult.RiskLevel.dangerous, result.risk_level);
+}
+
+test "CommandValidator.validate detects rm --recursive --force variations" {
+    const validator = CommandValidator.init(std.testing.allocator);
+    // Long form flags should also be detected
+    var result = try validator.validate("rm --recursive --force /");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(ValidationResult.RiskLevel.dangerous, result.risk_level);
+}
+
+test "CommandValidator.validate detects rm -rf /etc as dangerous" {
+    const validator = CommandValidator.init(std.testing.allocator);
+    var result = try validator.validate("rm -rf /etc");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(ValidationResult.RiskLevel.dangerous, result.risk_level);
+}
+
+test "CommandValidator.validate detects fork bomb" {
+    const validator = CommandValidator.init(std.testing.allocator);
+    var result = try validator.validate(":(){ :|:& };:");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(ValidationResult.RiskLevel.dangerous, result.risk_level);
 }

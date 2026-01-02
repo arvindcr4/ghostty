@@ -406,7 +406,7 @@ pub const AiInputMode = extern struct {
         active_threads: std.ArrayList(std.Thread) = std.ArrayList(std.Thread).init(std.heap.page_allocator),
 
         /// Thread cancellation flag - atomically checked by worker threads
-        cancellation_flag: std.atomic.Value = std.atomic.Value.init(0),
+        cancellation_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         /// Voice input manager for speech-to-text
         voice_manager: ?VoiceInputManager = null,
@@ -428,7 +428,7 @@ pub const AiInputMode = extern struct {
         context: ?[]const u8,
         assistant: AiAssistant,
         enable_streaming: bool,
-        cancellation_flag: *std.atomic.Value,
+        cancellation_flag: *std.atomic.Value(bool),
     };
 
     /// Result from AI request
@@ -887,8 +887,9 @@ pub const AiInputMode = extern struct {
                     showVoiceError(self, "Failed to initialize voice input");
                     return;
                 };
-                // Configure to use mock/whisper backend (not native which is macOS-only)
-                priv.voice_manager.?.config.backend = .mock;
+                // Use whisper backend on Linux/GTK - it will auto-fallback if whisper CLI unavailable
+                // The processNative() in voice.zig handles platform detection internally
+                priv.voice_manager.?.config.backend = .whisper;
             }
 
             // Start listening
