@@ -116,8 +116,25 @@ pub const SecurityScanner = struct {
         };
     };
 
-    /// Initialize security scanner
-    pub fn init(alloc: Allocator) SecurityScanner {
+    /// Initialize security scanner (may fail if pattern registration fails)
+    pub fn init(alloc: Allocator) !SecurityScanner {
+        var scanner = SecurityScanner{
+            .alloc = alloc,
+            .config = .{},
+            .patterns = ArrayList(SecretPattern).init(alloc),
+            .custom_patterns = ArrayList(SecretPattern).init(alloc),
+            .scan_history = ArrayList(ScanResult).init(alloc),
+        };
+
+        // Propagate error instead of silently failing
+        try scanner.registerDefaultPatterns();
+
+        return scanner;
+    }
+
+    /// Initialize security scanner with error handling (logs error but continues)
+    /// Use this when you want to continue even if pattern registration fails
+    pub fn initOrLog(alloc: Allocator) SecurityScanner {
         var scanner = SecurityScanner{
             .alloc = alloc,
             .config = .{},
@@ -579,7 +596,17 @@ pub const SecurityScanner = struct {
         while (context_end < text.len and text[context_end] != '\n') {
             context_end += 1;
         }
-        const context = self.alloc.dupe(u8, text[context_start..context_end]) catch "";
+        // Properly handle allocation failure instead of silently returning empty string
+        const context = self.alloc.dupe(u8, text[context_start..context_end]) catch |err| {
+            log.err("Failed to allocate context string: {}", .{err});
+            // Return minimal context on allocation failure
+            return .{
+                .offset = offset,
+                .line = line,
+                .column = column,
+                .context = "",
+            };
+        };
 
         return .{
             .offset = offset,
@@ -675,7 +702,7 @@ fn getSuggestion(secret_type: DetectedSecret.SecretType) []const u8 {
 test "SecurityScanner basic operations" {
     const alloc = std.testing.allocator;
 
-    var scanner = SecurityScanner.init(alloc);
+    var scanner = try SecurityScanner.init(alloc);
     defer scanner.deinit();
 
     // Test that scanner initializes correctly
